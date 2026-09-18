@@ -222,6 +222,13 @@ async def download_file(job_id: str, file_type: str):
     raise HTTPException(status_code=404, detail="対象ファイルが見つかりません")
 
 
+@app.get("/{full_path:path}")
+async def catch_all_fallback(full_path: str):
+    """未登録のURLでも404 Not Foundを出さず、安全にトップページを表示するキャッチオール"""
+    html_file = BASE_DIR / "templates" / "index.html"
+    return FileResponse(str(html_file), media_type="text/html")
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
