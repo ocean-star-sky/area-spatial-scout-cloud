@@ -227,8 +227,11 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
                     err_msg = f"SDK {model}(検索=True): {e}"
                     all_errors.append(err_msg)
                     print(f"[Info] {err_msg}")
+                    if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                        print("[Info] 429レートリミットを検知。5秒待機して通常生成へ移行します...")
+                        time.sleep(5)
 
-                # 1-2. 検索なし通常生成フォールバック
+                # 1-2. 検索なし通常生成フォールバック（モデル内蔵の膨大な知識で即座に回答）
                 try:
                     config = types.GenerateContentConfig(
                         temperature=0.2,
@@ -241,12 +244,14 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
                     )
                     if resp.text:
                         text_resp = resp.text.strip()
-                        print(f"[Research Engine] google-genai SDK: モデル '{model}' (検索なし) でリサーチ成功！")
+                        print(f"[Research Engine] google-genai SDK: モデル '{model}' (検索なし・ナレッジ生成) でリサーチ成功！")
                         break
                 except Exception as e:
                     err_msg = f"SDK {model}(検索=False): {e}"
                     all_errors.append(err_msg)
                     print(f"[Info] {err_msg}")
+                    if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                        time.sleep(3)
 
                 if text_resp:
                     break
