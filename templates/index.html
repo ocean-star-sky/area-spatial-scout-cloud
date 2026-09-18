@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Area Spatial Scout | クラウド自動レポートエンジン</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="apple-touch-icon" href="https://img.icons8.com/color/192/compass--v1.png">
+  <meta name="theme-color" content="#0F2C59">
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Hiragino Sans", sans-serif; }
+    .btn-primary { background: linear-gradient(135deg, #0F2C59 0%, #1E3E62 100%); }
+    .btn-primary:active { opacity: 0.85; transform: scale(0.98); }
+    .btn-success { background: linear-gradient(135deg, #059669 0%, #10B981 100%); }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900 min-h-screen pb-12">
+
+  <!-- ヘッダー -->
+  <header class="bg-[#0F2C59] text-white py-5 px-4 shadow-md sticky top-0 z-50">
+    <div class="max-w-md mx-auto flex items-center justify-between">
+      <div class="flex items-center space-x-2">
+        <span class="text-2xl">🗺️</span>
+        <div>
+          <h1 class="text-lg font-bold tracking-wide">Area Spatial Scout</h1>
+          <p class="text-xs text-blue-200">Cloud Autonomous Engine (Mac不要)</p>
+        </div>
+      </div>
+      <span class="text-xs bg-blue-800 text-blue-100 py-1 px-2.5 rounded-full border border-blue-600">Cloud Run</span>
+    </div>
+  </header>
+
+  <main class="max-w-md mx-auto px-4 mt-6">
+    
+    <!-- 概要カード -->
+    <div class="bg-white rounded-2xl p-5 shadow-sm border border-slate-200 mb-6">
+      <h2 class="text-sm font-bold text-slate-700 flex items-center mb-2">
+        <span class="mr-1.5">📱</span> スマホから一撃生成＆Google ドライブ直結
+      </h2>
+      <p class="text-xs text-slate-500 leading-relaxed">
+        エリアとテーマを入力するだけで、Geminiが食べログ・Googleマップを自律走査。国土地理院プロット地図・PC用A4カルテ・スマホ用Word（横スクロールゼロ）をGoogleドライブへ自動保存します。
+      </p>
+    </div>
+
+    <!-- フォーム -->
+    <form id="scoutForm" class="space-y-4">
+      
+      <div>
+        <label class="block text-xs font-bold text-slate-700 mb-1">エリア指定</label>
+        <input type="text" id="area" name="area" placeholder="例: 銀座、新橋、渋谷、恵比寿" required
+               class="w-full text-base px-4 py-3 bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-[#0F2C59] focus:outline-none shadow-sm">
+      </div>
+
+      <div>
+        <label class="block text-xs font-bold text-slate-700 mb-1">テーマ・業態指定</label>
+        <input type="text" id="theme" name="theme" placeholder="例: 個室接待鮨、サウナ、隠れ家イタリアン" required
+               class="w-full text-base px-4 py-3 bg-white border border-slate-300 rounded-xl focus:ring-2 focus:ring-[#0F2C59] focus:outline-none shadow-sm">
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-bold text-slate-700 mb-1">厳選件数</label>
+          <select id="count" name="count" class="w-full text-base px-3 py-3 bg-white border border-slate-300 rounded-xl focus:outline-none shadow-sm font-medium">
+            <option value="10" selected>Top 10（標準・推奨）</option>
+            <option value="5">Top 5（クイック）</option>
+            <option value="15">Top 15（広域）</option>
+          </select>
+        </div>
+
+        <div>
+          <label class="block text-xs font-bold text-slate-700 mb-1">アクセスキー</label>
+          <input type="password" id="password" name="password" placeholder="合言葉"
+                 class="w-full text-base px-3 py-3 bg-white border border-slate-300 rounded-xl focus:outline-none shadow-sm">
+        </div>
+      </div>
+
+      <!-- ワンタップ・プリセット -->
+      <div class="pt-1">
+        <label class="block text-xs font-bold text-slate-500 mb-1.5">⚡ クイック選択プリセット</label>
+        <div class="grid grid-cols-2 gap-2 text-xs">
+          <button type="button" onclick="setPreset('銀座', '個室接待鮨', 10)" class="p-2 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg text-slate-700 font-medium truncate">
+            🍣 銀座 × 個室接待鮨
+          </button>
+          <button type="button" onclick="setPreset('新橋', 'サウナ', 10)" class="p-2 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg text-slate-700 font-medium truncate">
+            ♨️ 新橋 × サウナ
+          </button>
+          <button type="button" onclick="setPreset('渋谷', 'コワーキングスペース', 10)" class="p-2 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg text-slate-700 font-medium truncate">
+            💻 渋谷 × コワーキング
+          </button>
+          <button type="button" onclick="setPreset('恵比寿', '個室接待イタリアン', 10)" class="p-2 bg-slate-100 hover:bg-slate-200 border border-slate-300 rounded-lg text-slate-700 font-medium truncate">
+            🍷 恵比寿 × 接待ビストロ
+          </button>
+        </div>
+      </div>
+
+      <button type="submit" id="submitBtn" class="w-full btn-primary text-white font-bold py-4 rounded-xl shadow-lg mt-4 flex items-center justify-center space-x-2 text-base">
+        <span>🚀</span>
+        <span>完全クラウド調査 ＆ レポート生成開始</span>
+      </button>
+
+    </form>
+
+    <!-- 進捗・実行中ステータス -->
+    <div id="progressCard" class="hidden bg-white rounded-2xl p-6 shadow-md border border-slate-200 mt-6 text-center space-y-4">
+      <div class="inline-block animate-spin text-4xl mb-1">⏳</div>
+      <h3 class="text-base font-bold text-slate-800" id="statusTitle">自律リサーチを実行中...</h3>
+      <p class="text-xs text-slate-500" id="statusDetail">Geminiが最新のWeb情報・個室条件を照合しています</p>
+      
+      <!-- プログレスバー -->
+      <div class="w-full bg-slate-200 rounded-full h-2.5 overflow-hidden">
+        <div id="progressBar" class="bg-[#0F2C59] h-2.5 rounded-full transition-all duration-500" style="width: 25%"></div>
+      </div>
+      
+      <div class="text-[11px] text-slate-400">※処理には通常 1〜2分程度かかります。画面を閉じてもクラウド側で処理は継続します。</div>
+    </div>
+
+    <!-- 完了カード -->
+    <div id="resultCard" class="hidden bg-white rounded-2xl p-5 shadow-xl border-2 border-emerald-500 mt-6 text-center space-y-4">
+      <div class="text-4xl mb-1">🎉</div>
+      <h3 class="text-base font-bold text-slate-800" id="resultTitle">レポート生成が完了しました！</h3>
+      <p class="text-xs text-slate-500">下のボタンからスマホやPCにワンタップで直接保存・閲覧できます。</p>
+
+      <!-- 地図プレビュー -->
+      <div id="mapContainer" class="rounded-xl overflow-hidden border border-slate-200 shadow-sm">
+        <img id="mapImg" src="" alt="国土地理院プロット地図" class="w-full h-auto block object-cover max-h-56">
+      </div>
+
+      <!-- ダウンロードボタングループ -->
+      <div class="space-y-2.5 text-left">
+        <!-- 1. スマホ閲覧専用 Word -->
+        <a id="mobileDocxLink" href="#" class="block w-full btn-primary text-white font-bold py-3.5 px-4 rounded-xl shadow flex items-center justify-between text-sm">
+          <div class="flex items-center space-x-2">
+            <span>📱</span>
+            <span>スマホ専用 Word を開く</span>
+          </div>
+          <span class="text-xs opacity-90 font-normal">横スクロールゼロ ➔</span>
+        </a>
+
+        <!-- 2. 全成果物一括ZIP -->
+        <a id="zipLink" href="#" class="block w-full bg-amber-600 hover:bg-amber-700 text-white font-bold py-3 px-4 rounded-xl shadow flex items-center justify-between text-sm">
+          <div class="flex items-center space-x-2">
+            <span>📦</span>
+            <span>全成果物一括ZIPを保存</span>
+          </div>
+          <span class="text-xs opacity-90 font-normal">Word2種・地図・CSV ➔</span>
+        </a>
+
+        <!-- 3. PC・印刷用 Word -->
+        <a id="pcDocxLink" href="#" class="block w-full bg-slate-800 hover:bg-slate-900 text-white font-bold py-2.5 px-4 rounded-xl shadow flex items-center justify-between text-xs">
+          <div class="flex items-center space-x-2">
+            <span>📄</span>
+            <span>PC・印刷用 Word (A4カルテ)</span>
+          </div>
+          <span class="text-xs opacity-75">全12pt以上 ➔</span>
+        </a>
+
+        <!-- 4. CSV台帳 -->
+        <a id="csvLink" href="#" class="block w-full bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold py-2 px-4 rounded-xl border border-slate-300 flex items-center justify-between text-xs">
+          <div class="flex items-center space-x-2">
+            <span>📊</span>
+            <span>スポット台帳 (CSV)</span>
+          </div>
+          <span class="text-xs text-slate-400">DL ➔</span>
+        </a>
+
+        <!-- 5. Google ドライブ（同期成功時のみ表示） -->
+        <a id="driveLink" href="#" target="_blank" class="hidden block w-full btn-success text-white font-bold py-3 px-4 rounded-xl shadow flex items-center justify-center space-x-2 text-sm mt-2">
+          <span>📂</span>
+          <span>Google ドライブで開く</span>
+        </a>
+      </div>
+
+      <div class="pt-2 border-t border-slate-200">
+        <button onclick="resetForm()" class="text-xs text-slate-500 underline">別のエリア・テーマを調べる</button>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    function setPreset(area, theme, count) {
+      document.getElementById('area').value = area;
+      document.getElementById('theme').value = theme;
+      document.getElementById('count').value = count;
+    }
+
+    const form = document.getElementById('scoutForm');
+    const progressCard = document.getElementById('progressCard');
+    const resultCard = document.getElementById('resultCard');
+    const submitBtn = document.getElementById('submitBtn');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      
+      const area = document.getElementById('area').value.trim();
+      const theme = document.getElementById('theme').value.trim();
+      const count = document.getElementById('count').value;
+      const password = document.getElementById('password').value;
+
+      form.classList.add('hidden');
+      progressCard.classList.remove('hidden');
+      resultCard.classList.add('hidden');
+
+      // ステップアニメーション
+      updateProgress(30, "AI検索グラウンディング中...", "食べログ・Googleマップ・公式情報をリアルタイム照合中");
+
+      try {
+        const response = await fetch('/api/scout', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ area, theme, count: parseInt(count), password })
+        });
+
+        if (!response.ok) {
+          const errData = await response.json();
+          throw new Error(errData.detail || '生成エラーが発生しました');
+        }
+
+        updateProgress(75, "地図合成＆デュアルWord生成中...", "国土地理院プロット地図と横スクロールゼロWordを作成中");
+
+        const data = await response.json();
+        
+        updateProgress(100, "生成完了！", "ダウンロードリンクを準備中...");
+
+        setTimeout(() => {
+          progressCard.classList.add('hidden');
+          resultCard.classList.remove('hidden');
+
+          document.getElementById('resultTitle').innerText = `【${area}】${theme} Top${data.spots_count || count} レポート完成！`;
+          document.getElementById('mapImg').src = data.map_url;
+          document.getElementById('mobileDocxLink').href = data.mobile_docx_url;
+          document.getElementById('pcDocxLink').href = data.pc_docx_url;
+          document.getElementById('zipLink').href = data.zip_url;
+          document.getElementById('csvLink').href = data.csv_url;
+
+          if (data.drive_url) {
+            const driveBtn = document.getElementById('driveLink');
+            driveBtn.href = data.drive_url;
+            driveBtn.classList.remove('hidden');
+          }
+        }, 800);
+
+      } catch (err) {
+        alert("エラー: " + err.message);
+        form.classList.remove('hidden');
+        progressCard.classList.add('hidden');
+      }
+    });
+
+    function updateProgress(percent, title, detail) {
+      document.getElementById('progressBar').style.width = percent + '%';
+      document.getElementById('statusTitle').innerText = title;
+      document.getElementById('statusDetail').innerText = detail;
+    }
+
+    function resetForm() {
+      form.classList.remove('hidden');
+      resultCard.classList.add('hidden');
+      progressCard.classList.add('hidden');
+    }
+  </script>
+</body>
+</html>
