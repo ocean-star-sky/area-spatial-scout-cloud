@@ -197,7 +197,7 @@ def geocode_address(address: str) -> tuple[float, float] | None:
     url = f"https://msearch.gsi.go.jp/address-search/AddressSearch?q={urllib.parse.quote(address.strip())}"
     req = urllib.request.Request(url, headers={"User-Agent": "AntigravityMapScout/1.0"})
     try:
-        with urllib.request.urlopen(req, timeout=5) as res:
+        with urllib.request.urlopen(req, timeout=2) as res:
             data = json.loads(res.read().decode("utf-8"))
             if data and len(data) > 0:
                 coords = data[0]["geometry"]["coordinates"]
@@ -266,7 +266,7 @@ def generate_spots_map_image(spots: list[dict], output_path: Path, area: str = "
             tile_url = f"https://cyberjapandata.gsi.go.jp/xyz/std/{zoom}/{tx}/{ty}.png"
             req = urllib.request.Request(tile_url, headers={"User-Agent": "AntigravityMapScout/1.0"})
             try:
-                with urllib.request.urlopen(req, timeout=5) as res:
+                with urllib.request.urlopen(req, timeout=2) as res:
                     tile_data = res.read()
                     tile_img = Image.open(io.BytesIO(tile_data)).convert("RGB")
                     px_t = (tx - tile_x_start) * 256

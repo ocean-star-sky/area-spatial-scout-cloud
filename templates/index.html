@@ -263,6 +263,7 @@
 
       evtSource.onerror = (err) => {
         console.warn("EventSource 切断・または完了によるクローズ:", err);
+        evtSource.close();
         // もしジョブIDが取得できていれば、ポーリングで結果を救済確認
         if (lastJobId && !pollInterval) {
           pollInterval = setInterval(async () => {

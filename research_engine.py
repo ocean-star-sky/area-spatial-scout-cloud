@@ -28,7 +28,7 @@ def download_and_crop_image(url: str, output_path: Path, target_w: int = 1200, t
     """Webから画像をダウンロードし、指定アスペクト比で高品質リサイズ"""
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
     try:
-        with urllib.request.urlopen(req, timeout=10) as res:
+        with urllib.request.urlopen(req, timeout=3) as res:
             with open(output_path, "wb") as f:
                 f.write(res.read())
         

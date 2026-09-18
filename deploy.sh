@@ -71,8 +71,10 @@ gcloud run deploy "$SERVICE_NAME" \
     --cpu 1 \
     --timeout 600 \
     --min-instances 0 \
-    --max-instances 1 \
+    --max-instances 10 \
+    --concurrency 80 \
     --no-cpu-throttling \
+    --session-affinity \
     --set-env-vars "GEMINI_API_KEY=$GEMINI_API_KEY,SCOUT_PASSWORD=$SCOUT_PASSWORD" \
     --project "$PROJECT_ID"
 

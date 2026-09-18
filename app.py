@@ -162,6 +162,14 @@ def stream_scout_generator(area: str, theme: str, count: int, password: str = ""
         if error:
             payload["error"] = error
         JOBS[job_id] = payload
+        
+        # ディスク永続化（マルチインスタンス耐性）
+        try:
+            with open(job_dir / "status.json", "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+        except Exception:
+            pass
+
         return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
     yield make_event("processing", 15, "AIリサーチ開始...", "Gemini高度AIモデルが最新の口コミ・住所・営業情報を自律リサーチ中")
@@ -278,6 +286,13 @@ def start_scout_job(req: ScoutRequest):
 def get_scout_job_status(job_id: str):
     """スマホ側から2秒おきに進捗を取得するステータスAPI"""
     if job_id not in JOBS:
+        status_file = OUTPUTS_DIR / job_id / "status.json"
+        if status_file.exists():
+            try:
+                with open(status_file, "r", encoding="utf-8") as f:
+                    return JSONResponse(json.load(f))
+            except Exception:
+                pass
         raise HTTPException(status_code=404, detail="指定された調査ジョブが見つかりません")
     return JSONResponse(JOBS[job_id])
 
