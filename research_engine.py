@@ -52,42 +52,84 @@ def download_and_crop_image(url: str, output_path: Path, target_w: int = 1200, t
 
 
 def extract_json_from_text(text: str) -> dict:
-    """LLMの任意の応答テキストからJSONオブジェクトを堅牢に抽出・パースする"""
+    """LLMの任意の応答テキストからJSONオブジェクトを抽出し、途切れ・構文乱れを完全自動修復する超堅牢パーサー"""
     text = text.strip()
     
-    # 1. ```json ... ``` または ``` ... ``` コードブロックからの抽出
-    matches = re.findall(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
-    for m in matches:
-        m_str = m.strip()
-        first_brace = m_str.find("{")
-        last_brace = m_str.rfind("}")
-        if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-            candidate = m_str[first_brace : last_brace + 1]
-            try:
-                return json.loads(candidate, strict=False)
-            except Exception:
-                cleaned = re.sub(r",\s*([\]}])", r"\1", candidate)
-                try:
-                    return json.loads(cleaned, strict=False)
-                except Exception:
-                    pass
+    # 1. コードブロック抽出
+    m = re.search(r"```(?:json)?\s*([\s\S]*?)(?:```|$)", text)
+    if m:
+        text = m.group(1).strip()
+        
+    fb = text.find("{")
+    if fb == -1:
+        raise ValueError("JSONの開始 '{' が見つかりません")
+    text = text[fb:]
+    
+    # 2. そのままパース
+    try:
+        return json.loads(text, strict=False)
+    except Exception:
+        pass
+        
+    # 3. 末尾カンマ除去
+    cleaned = re.sub(r",\s*([\]}])", r"\1", text)
+    try:
+        return json.loads(cleaned, strict=False)
+    except Exception:
+        pass
 
-    # 2. 全文から最外側の { と } を直接抽出
-    first_brace = text.find("{")
-    last_brace = text.rfind("}")
-    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
-        candidate = text[first_brace : last_brace + 1]
+    # 4. 途切れ自動修復（スタックによる未完了括弧・未完了文字列の自動補完）
+    stack = []
+    in_str = False
+    esc = False
+    
+    for c in cleaned:
+        if esc:
+            esc = False
+            continue
+        if c == "\\":
+            esc = True
+            continue
+        if c == '"':
+            in_str = not in_str
+            continue
+        if not in_str:
+            if c in "{[":
+                stack.append("}" if c == "{" else "]")
+            elif c in "}]":
+                if stack and stack[-1] == c:
+                    stack.pop()
+
+    repaired = cleaned
+    if in_str:
+        repaired += '"'
+    
+    repaired = re.sub(r"[:,\\s]+$", "", repaired)
+    repaired += "".join(reversed(stack))
+    
+    try:
+        return json.loads(repaired, strict=False)
+    except Exception:
+        pass
+        
+    # 5. 最後の完全なスポットで切って閉じる
+    last_spot_end = cleaned.rfind("},")
+    if last_spot_end != -1:
+        truncated_to_spot = cleaned[:last_spot_end + 1] + "]}"
         try:
-            return json.loads(candidate, strict=False)
+            return json.loads(truncated_to_spot, strict=False)
         except Exception:
-            cleaned = re.sub(r",\s*([\]}])", r"\1", candidate)
-            try:
-                return json.loads(cleaned, strict=False)
-            except Exception:
-                pass
+            pass
 
-    # 3. フォールバック
-    return json.loads(text, strict=False)
+    # 6. 末尾の } まででパース
+    lb = text.rfind("}")
+    if lb != -1 and lb > fb:
+        try:
+            return json.loads(text[:lb + 1], strict=False)
+        except Exception:
+            pass
+
+    raise ValueError("JSONの解析・自動修復に失敗しました")
 
 
 def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: Path = None, api_key: str = None) -> dict:
@@ -106,8 +148,8 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
 1. テーマが「個室」や「接待」を含む場合は、カウンターのみ（個室なし）の店舗は絶対に排除し、確実に「完全個室」または「個室カウンター」を完備した実在店舗のみを厳選すること。
 2. 食べログ3.5以上やGoogleマップ高評価、ミシュラン星獲得など、信頼できる高評価店のみを選定すること。
 3. 住所は国土地理院APIでジオコーディングできるよう、正確な正式住所（番地・ビル名・階数）を記載すること。
-4. 各スポットにつき、利用者のリアルな生の声・クチコミ（個室の静粛性、ホスピタリティ、予約のコツ、注意点・キャンセルポリシーなど）を必ず8件、具体的かつ臨場感豊かに記載すること。
-5. 出力はMarkdownのコードブロック（```json ... ```）の中に、以下のスキーマに完全準拠した有効なJSONオブジェクトのみを含めること。前置きや解説の文章は一切不要です。
+4. 各スポットにつき、利用者のリアルな生の声・クチコミ（個室の静粛性、ホスピタリティ、予約のコツ、注意点など）を臨場感豊かに3〜4件記載すること。
+5. 出力はMarkdownのコードブロック（```json ... ```）の中に、以下のスキーマに完全準拠した有効なJSONオブジェクトのみを含めること。途中で途切れないよう最後まで完全に出力してください。前置きや解説の文章は一切不要です。
 
 【出力JSONスキーマ】
 {{
@@ -115,7 +157,7 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
     "area": "{area}",
     "theme": "{theme}",
     "scouted_at": "{datetime.now().strftime('%Y-%m-%d')}",
-    "summary_text": "調査概要とエグゼクティブサマリ（300〜400字程度）",
+    "summary_text": "調査概要とエグゼクティブサマリ（300字程度）",
     "findings": [
       "主要ファインディングス1",
       "主要ファインディングス2",
@@ -130,7 +172,7 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
       "name": "店舗・施設名 (英語名・読み)",
       "category": "業態・特徴カテゴリ",
       "rating": "星評価（例: 4.3 / 食べログ 3.65）",
-      "reviews_count": クチコミ件数（数値）,
+      "reviews_count": 350,
       "address": "東京都中央区...",
       "url": "公式サイトまたは予約URL",
       "key_topics": ["特徴1", "特徴2", "特徴3", "特徴4"],
@@ -143,11 +185,7 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
         "クチコミ1",
         "クチコミ2",
         "クチコミ3",
-        "クチコミ4",
-        "クチコミ5",
-        "クチコミ6",
-        "クチコミ7",
-        "クチコミ8"
+        "クチコミ4"
       ]
     }}
   ]
