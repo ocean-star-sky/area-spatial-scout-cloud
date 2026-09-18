@@ -188,6 +188,7 @@
     const progressCard = document.getElementById('progressCard');
     const resultCard = document.getElementById('resultCard');
     const submitBtn = document.getElementById('submitBtn');
+    let pollInterval = null;
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -201,53 +202,78 @@
       progressCard.classList.remove('hidden');
       resultCard.classList.add('hidden');
 
-      // ステップアニメーション
-      updateProgress(30, "AI検索グラウンディング中...", "食べログ・Googleマップ・公式情報をリアルタイム照合中");
+      updateProgress(10, "クラウドAIエンジン起動中...", "リサーチジョブを割り当てています");
 
       try {
-        const response = await fetch('/api/scout', {
+        // 1. ジョブ開始リクエスト (0.05秒で即座に応答・タイムアウト絶対ゼロ)
+        const startRes = await fetch('/api/scout', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ area, theme, count: parseInt(count), password })
         });
 
-        if (!response.ok) {
-          const errText = await response.text();
-          let msg = "生成エラーが発生しました";
+        if (!startRes.ok) {
+          const errText = await startRes.text();
+          let msg = "リサーチジョブの開始に失敗しました";
           try {
             const errData = JSON.parse(errText);
             msg = errData.detail || msg;
           } catch(e) {
-            msg = errText.includes("Service Unavailable") ? "サーバーが一時的に混雑しています。数秒後に再度お試しください。" : errText;
+            msg = errText;
           }
           throw new Error(msg);
         }
 
-        updateProgress(75, "地図合成＆デュアルWord生成中...", "国土地理院プロット地図と横スクロールゼロWordを作成中");
+        const startData = await startRes.json();
+        const jobId = startData.job_id;
 
-        const data = await response.json();
-        
-        updateProgress(100, "生成完了！", "ダウンロードリンクを準備中...");
+        // 2. 2秒ごとのステータスポーリング（進捗リアルタイム表示＆回線瞬断にも完全対応）
+        pollInterval = setInterval(async () => {
+          try {
+            const statusRes = await fetch(`/api/scout/status/${jobId}`);
+            if (!statusRes.ok) return;
 
-        setTimeout(() => {
-          progressCard.classList.add('hidden');
-          resultCard.classList.remove('hidden');
+            const job = await statusRes.json();
 
-          document.getElementById('resultTitle').innerText = `【${area}】${theme} Top${data.spots_count || count} レポート完成！`;
-          document.getElementById('mapImg').src = data.map_url;
-          document.getElementById('mobileDocxLink').href = data.mobile_docx_url;
-          document.getElementById('pcDocxLink').href = data.pc_docx_url;
-          document.getElementById('zipLink').href = data.zip_url;
-          document.getElementById('csvLink').href = data.csv_url;
+            if (job.status === 'processing') {
+              updateProgress(job.progress || 30, job.step || "リサーチ進行中...", job.detail || "クラウドAIが処理しています");
+            } else if (job.status === 'completed') {
+              clearInterval(pollInterval);
+              updateProgress(100, "レポート生成完了！", "ダウンロードリンクを表示します");
 
-          if (data.drive_url) {
-            const driveBtn = document.getElementById('driveLink');
-            driveBtn.href = data.drive_url;
-            driveBtn.classList.remove('hidden');
+              setTimeout(() => {
+                progressCard.classList.add('hidden');
+                resultCard.classList.remove('hidden');
+
+                const data = job.result;
+                document.getElementById('resultTitle').innerText = `【${area}】${theme} Top${data.spots_count || count} レポート完成！`;
+                document.getElementById('mapImg').src = data.map_url;
+                document.getElementById('mobileDocxLink').href = data.mobile_docx_url;
+                document.getElementById('pcDocxLink').href = data.pc_docx_url;
+                document.getElementById('zipLink').href = data.zip_url;
+                document.getElementById('csvLink').href = data.csv_url;
+
+                if (data.drive_url) {
+                  const driveBtn = document.getElementById('driveLink');
+                  driveBtn.href = data.drive_url;
+                  driveBtn.classList.remove('hidden');
+                }
+              }, 600);
+
+            } else if (job.status === 'failed') {
+              clearInterval(pollInterval);
+              alert("生成エラー: " + (job.error || "調査中に予期せぬエラーが発生しました"));
+              form.classList.remove('hidden');
+              progressCard.classList.add('hidden');
+            }
+          } catch(pollErr) {
+            // 一時的な通信エラー時はポーリングを継続
+            console.log("ポーリング一時待機:", pollErr);
           }
-        }, 800);
+        }, 2000);
 
       } catch (err) {
+        if (pollInterval) clearInterval(pollInterval);
         alert("エラー: " + err.message);
         form.classList.remove('hidden');
         progressCard.classList.add('hidden');

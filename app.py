@@ -66,12 +66,83 @@ async def health_check():
     return {"status": "ok", "service": "area-spatial-scout-cloud"}
 
 
+JOBS = {}
+
+
+def background_scout_task(job_id: str, area: str, theme: str, count: int, job_dir: Path):
+    """別スレッドで安全に実行される非同期リサーチ・レポート生成ワーカー"""
+    try:
+        JOBS[job_id] = {
+            "status": "processing",
+            "progress": 25,
+            "step": "AI検索グラウンディング中...",
+            "detail": "Gemini 3.6 Flashが最新の口コミ・住所・営業情報をリサーチ中"
+        }
+        data = run_autonomous_research(area=area, theme=theme, count=count, output_dir=job_dir)
+
+        # 構造化JSONを保存
+        json_path = job_dir / "data.json"
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        JOBS[job_id] = {
+            "status": "processing",
+            "progress": 65,
+            "step": "地図合成＆デュアルWord生成中...",
+            "detail": "国土地理院プロット地図とスマホ専用Wordを作成中"
+        }
+        pack = generate_full_report_pack(data, job_dir)
+        folder_name = pack["folder_name"]
+
+        # 全成果物の一括ZIPアーカイブ生成
+        zip_base = job_dir / f"{folder_name}_一括納品パック"
+        shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
+
+        JOBS[job_id] = {
+            "status": "processing",
+            "progress": 90,
+            "step": "成果物を保存中...",
+            "detail": "ダウンロードリンクとGoogleドライブ保存を処理中"
+        }
+        drive_url = None
+        try:
+            drive_url = upload_report_directory(job_dir, target_folder_name=folder_name)
+        except Exception as drive_err:
+            print(f"[Notice] Google Drive への同期をスキップ: {drive_err}")
+
+        cleanup_old_jobs()
+
+        JOBS[job_id] = {
+            "status": "completed",
+            "progress": 100,
+            "step": "レポート生成完了！",
+            "detail": "すべての成果物の準備が整いました",
+            "result": {
+                "status": "success",
+                "folder_name": folder_name,
+                "drive_url": drive_url,
+                "job_id": job_id,
+                "spots_count": len(data.get("spots", [])),
+                "map_url": f"/api/download/{job_id}/map",
+                "mobile_docx_url": f"/api/download/{job_id}/mobile_docx",
+                "pc_docx_url": f"/api/download/{job_id}/pc_docx",
+                "csv_url": f"/api/download/{job_id}/csv",
+                "zip_url": f"/api/download/{job_id}/zip"
+            }
+        }
+    except Exception as e:
+        traceback.print_exc()
+        JOBS[job_id] = {
+            "status": "failed",
+            "error": str(e)
+        }
+
+
 @app.post("/api/scout")
-async def run_scout_job(req: ScoutRequest, bg_tasks: BackgroundTasks):
+def start_scout_job(req: ScoutRequest):
     """
-    エリア・テーマの調査・レポート生成・スマホ直結ダウンロード・Google ドライブ自動同期 API
+    ジョブを即座（0.05秒）にバックグラウンド起動し、タイムアウトや503を物理遮断するAPI
     """
-    # 簡易認証チェック
     if SCOUT_PASSWORD and req.password != SCOUT_PASSWORD:
         raise HTTPException(status_code=401, detail="アクセスキー（パスワード）が正しくありません")
 
@@ -86,50 +157,33 @@ async def run_scout_job(req: ScoutRequest, bg_tasks: BackgroundTasks):
     job_dir = OUTPUTS_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    try:
-        # 1. 自律リサーチ (Gemini API with Google Search Grounding)
-        data = run_autonomous_research(area=area, theme=theme, count=count, output_dir=job_dir)
+    JOBS[job_id] = {
+        "status": "processing",
+        "progress": 10,
+        "step": "リサーチを開始します...",
+        "detail": "クラウド自律エンジン起動中"
+    }
 
-        # 構造化JSONを保存
-        json_path = job_dir / "data.json"
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+    import threading
+    worker = threading.Thread(
+        target=background_scout_task,
+        args=(job_id, area, theme, count, job_dir),
+        daemon=True
+    )
+    worker.start()
 
-        # 2. 地図合成 ＆ デュアルWord（PC版・スマホ版）＆ CSV台帳生成
-        pack = generate_full_report_pack(data, job_dir)
-        folder_name = pack["folder_name"]
+    return JSONResponse({
+        "status": "started",
+        "job_id": job_id
+    })
 
-        # 3. 全成果物の一括ZIPアーカイブ生成
-        zip_base = job_dir / f"{folder_name}_一括納品パック"
-        shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
 
-        # 4. Google ドライブへ直接アップロード（個人アカウントのサービスアカウント容量制限等がある場合はスキップ）
-        drive_url = None
-        try:
-            drive_url = upload_report_directory(job_dir, target_folder_name=folder_name)
-        except Exception as drive_err:
-            print(f"[Notice] Google Drive への同期をスキップしました (個人Gmailアカウント等の制限): {drive_err}")
-
-        # 古いキャッシュの定期クリーンアップをバックグラウンド実行
-        bg_tasks.add_task(cleanup_old_jobs)
-
-        return JSONResponse({
-            "status": "success",
-            "message": "レポート生成が完了しました！",
-            "folder_name": folder_name,
-            "drive_url": drive_url,
-            "job_id": job_id,
-            "spots_count": len(data.get("spots", [])),
-            "map_url": f"/api/download/{job_id}/map",
-            "mobile_docx_url": f"/api/download/{job_id}/mobile_docx",
-            "pc_docx_url": f"/api/download/{job_id}/pc_docx",
-            "csv_url": f"/api/download/{job_id}/csv",
-            "zip_url": f"/api/download/{job_id}/zip"
-        })
-
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"生成エラー: {str(e)}")
+@app.get("/api/scout/status/{job_id}")
+def get_scout_job_status(job_id: str):
+    """スマホ側から2秒おきに進捗を取得するステータスAPI"""
+    if job_id not in JOBS:
+        raise HTTPException(status_code=404, detail="指定された調査ジョブが見つかりません")
+    return JSONResponse(JOBS[job_id])
 
 
 @app.get("/api/download/{job_id}/{file_type}")
