@@ -212,8 +212,15 @@
         });
 
         if (!response.ok) {
-          const errData = await response.json();
-          throw new Error(errData.detail || '生成エラーが発生しました');
+          const errText = await response.text();
+          let msg = "生成エラーが発生しました";
+          try {
+            const errData = JSON.parse(errText);
+            msg = errData.detail || msg;
+          } catch(e) {
+            msg = errText.includes("Service Unavailable") ? "サーバーが一時的に混雑しています。数秒後に再度お試しください。" : errText;
+          }
+          throw new Error(msg);
         }
 
         updateProgress(75, "地図合成＆デュアルWord生成中...", "国土地理院プロット地図と横スクロールゼロWordを作成中");

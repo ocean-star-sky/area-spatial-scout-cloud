@@ -10,6 +10,7 @@ Google Gemini API (with Google Search Grounding) を使用して、
 import os
 import re
 import json
+import shutil
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -357,19 +358,28 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
             "https://images.unsplash.com/photo-1492571350019-22de08371fd3?w=1200&q=80"
         ]
         
+        # 高速キャッシュ方式: 代表ストック写真2枚のみをダウンロードし、各スポットへ高速コピー（タイムアウト防止）
+        base_p1 = output_dir / "base_photo_1.jpg"
+        base_p2 = output_dir / "base_photo_2.jpg"
+        download_and_crop_image(stock_photos[0], base_p1)
+        download_and_crop_image(stock_photos[1], base_p2)
+
+        # 万一ダウンロードできなかった場合のローカル自動生成
+        if not base_p1.exists():
+            img1 = Image.new("RGB", (1200, 800), (25, 45, 75))
+            img1.save(base_p1, "JPEG")
+        if not base_p2.exists():
+            img2 = Image.new("RGB", (1200, 800), (35, 65, 105))
+            img2.save(base_p2, "JPEG")
+
         spots = data.get("spots", [])
         for i, s in enumerate(spots):
             s_id = s.get("id", f"spot_{i+1}")
-            p1_name = f"{s_id}_photo_1.jpg"
-            p2_name = f"{s_id}_photo_2.jpg"
-            p1_path = output_dir / p1_name
-            p2_path = output_dir / p2_name
+            p1_path = output_dir / f"{s_id}_photo_1.jpg"
+            p2_path = output_dir / f"{s_id}_photo_2.jpg"
             
-            url1 = stock_photos[(i * 2) % len(stock_photos)]
-            url2 = stock_photos[(i * 2 + 1) % len(stock_photos)]
-            
-            download_and_crop_image(url1, p1_path)
-            download_and_crop_image(url2, p2_path)
+            shutil.copy(base_p1, p1_path)
+            shutil.copy(base_p2, p2_path)
             
             s_name = s.get("name", "").split("(")[0].strip()
             s["photos"] = [
