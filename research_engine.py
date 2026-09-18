@@ -167,7 +167,7 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
         try:
             print("[Research Engine] google-genai 公式SDKによる接続を試行します...")
             client = genai.Client(api_key=key.strip())
-            for model in ["gemini-2.0-flash", "gemini-1.5-flash"]:
+            for model in ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.5-pro"]:
                 # 1-1. 検索グラウンディング付き
                 try:
                     config = types.GenerateContentConfig(
@@ -218,7 +218,7 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
     # 2. REST API 直接呼び出しによるフォールバック (SDK非利用時またはSDK失敗時)
     if not text_resp:
         print("[Research Engine] REST API 直接呼び出しによるフォールバックを試行します...")
-        candidate_models = ["gemini-2.0-flash", "gemini-1.5-flash"]
+        candidate_models = ["gemini-3.6-flash", "gemini-2.5-flash", "gemini-2.5-pro"]
         
         # REST APIの正しいスキーマ (スネークケース google_search)
         payload_with_search = {
