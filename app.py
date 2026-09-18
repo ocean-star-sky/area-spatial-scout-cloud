@@ -282,6 +282,28 @@ def start_scout_job(req: ScoutRequest):
     })
 
 
+@app.get("/api/scout/jobs")
+def list_scout_jobs():
+    """管理・監視用: 現在実行中および最近のジョブ状態一覧を返す"""
+    results = {}
+    for j_id, j_data in JOBS.items():
+        results[j_id] = j_data
+    try:
+        for job_dir in sorted(OUTPUTS_DIR.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)[:10]:
+            j_id = job_dir.name
+            if j_id not in results:
+                s_file = job_dir / "status.json"
+                if s_file.exists():
+                    try:
+                        with open(s_file, "r", encoding="utf-8") as f:
+                            results[j_id] = json.load(f)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return JSONResponse(results)
+
+
 @app.get("/api/scout/status/{job_id}")
 def get_scout_job_status(job_id: str):
     """スマホ側から2秒おきに進捗を取得するステータスAPI"""
