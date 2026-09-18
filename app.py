@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from pydantic import BaseModel
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
 
 from research_engine import run_autonomous_research
 from report_engine import generate_full_report_pack
@@ -136,6 +136,102 @@ def background_scout_task(job_id: str, area: str, theme: str, count: int, job_di
             "status": "failed",
             "error": str(e)
         }
+
+
+def stream_scout_generator(area: str, theme: str, count: int, password: str = ""):
+    """Cloud RunのCPUスロットリングを100%防止し、進捗をリアルタイム送信するSSEストリーミングジェネレータ"""
+    if SCOUT_PASSWORD and password != SCOUT_PASSWORD:
+        err_data = {"status": "failed", "error": "アクセスキー（パスワード）が正しくありません"}
+        yield f"data: {json.dumps(err_data, ensure_ascii=False)}\n\n"
+        return
+
+    job_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    job_dir = OUTPUTS_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    def make_event(status, progress, step, detail, result=None, error=None):
+        payload = {
+            "status": status,
+            "job_id": job_id,
+            "progress": progress,
+            "step": step,
+            "detail": detail
+        }
+        if result:
+            payload["result"] = result
+        if error:
+            payload["error"] = error
+        JOBS[job_id] = payload
+        return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    yield make_event("processing", 15, "AIリサーチ開始...", "Gemini高度AIモデルが最新の口コミ・住所・営業情報を自律リサーチ中")
+
+    try:
+        data = run_autonomous_research(area=area, theme=theme, count=count, output_dir=job_dir)
+
+        # 構造化JSONを保存
+        json_path = job_dir / "data.json"
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        yield make_event("processing", 60, "地図合成＆デュアルWord生成中...", "国土地理院プロット地図とスマホ専用Wordを作成中")
+
+        pack = generate_full_report_pack(data, job_dir)
+        folder_name = pack["folder_name"]
+
+        # 一括ZIPアーカイブ生成
+        zip_base = job_dir / f"{folder_name}_一括納品パック"
+        shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
+
+        yield make_event("processing", 88, "成果物を保存中...", "ダウンロードリンクとGoogleドライブ保存を処理中")
+
+        drive_url = None
+        try:
+            drive_url = upload_report_directory(job_dir, target_folder_name=folder_name)
+        except Exception as drive_err:
+            print(f"[Notice] Google Drive への同期をスキップ: {drive_err}")
+
+        cleanup_old_jobs()
+
+        result_payload = {
+            "status": "success",
+            "folder_name": folder_name,
+            "drive_url": drive_url,
+            "job_id": job_id,
+            "spots_count": len(data.get("spots", [])),
+            "map_url": f"/api/download/{job_id}/map",
+            "mobile_docx_url": f"/api/download/{job_id}/mobile_docx",
+            "pc_docx_url": f"/api/download/{job_id}/pc_docx",
+            "csv_url": f"/api/download/{job_id}/csv",
+            "zip_url": f"/api/download/{job_id}/zip"
+        }
+
+        yield make_event("completed", 100, "レポート生成完了！", "すべての成果物の準備が整いました", result=result_payload)
+
+    except Exception as e:
+        traceback.print_exc()
+        yield make_event("failed", 0, "生成エラー", str(e), error=str(e))
+
+
+@app.get("/api/scout/stream")
+def scout_stream_endpoint(area: str, theme: str, count: int = 10, password: str = ""):
+    """
+    スマホ向けリアルタイムSSEストリーミングAPI。
+    接続を維持して進捗をリアルタイム配信し、Cloud RunのCPUフリーズを物理的に完全防止。
+    """
+    area = area.strip()
+    theme = theme.strip()
+    count = min(max(count, 3), 20)
+    
+    return StreamingResponse(
+        stream_scout_generator(area=area, theme=theme, count=count, password=password),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 @app.post("/api/scout")
