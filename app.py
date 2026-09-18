@@ -75,8 +75,8 @@ def background_scout_task(job_id: str, area: str, theme: str, count: int, job_di
         JOBS[job_id] = {
             "status": "processing",
             "progress": 25,
-            "step": "AI検索グラウンディング中...",
-            "detail": "Gemini 3.6 Flashが最新の口コミ・住所・営業情報をリサーチ中"
+            "step": "AIリサーチ＆スポット抽出中...",
+            "detail": "Gemini高度AIモデルが最新の口コミ・住所・営業情報を自律リサーチ中"
         }
         data = run_autonomous_research(area=area, theme=theme, count=count, output_dir=job_dir)
 
