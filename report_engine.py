@@ -359,7 +359,32 @@ def generate_spots_map_image(spots: list[dict], output_path: Path, area: str = "
     for gy in range(0, map_img.height, 64):
         grid_draw.line([(0, gy), (map_img.width, gy)], fill=(225, 232, 242), width=1)
 
-    # 3. 高精細プロット都市グリッドマップ（外部通信0秒・完全ローカル瞬時描画）
+    # 国土地理院標準地図タイルの並列高速ダウンロード（各タイルタイムアウト 2.0秒）
+    headers = {"User-Agent": "AntigravityMapScout/2.0"}
+    def fetch_gsi_tile(tx, ty):
+        url = f"https://cyberjapandata.gsi.go.jp/xyz/std/{zoom}/{tx}/{ty}.png"
+        req = urllib.request.Request(url, headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=2.0) as res:
+                t_img = Image.open(io.BytesIO(res.read())).convert("RGB")
+                return (tx, ty, t_img)
+        except Exception:
+            return (tx, ty, None)
+
+    tile_tasks = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+        for tx in range(tile_x_start, tile_x_end + 1):
+            for ty in range(tile_y_start, tile_y_end + 1):
+                tile_tasks.append(executor.submit(fetch_gsi_tile, tx, ty))
+        
+        for future in concurrent.futures.as_completed(tile_tasks):
+            tx, ty, t_img = future.result()
+            if t_img:
+                px = (tx - tile_x_start) * 256
+                py = (ty - tile_y_start) * 256
+                map_img.paste(t_img, (px, py))
+
+    # 3. 高精細プロット都市グリッドマップ
     # 同心円距離スケール（中心から1km, 2kmのガイドライン）
     c_px = map_img.width // 2
     c_py = map_img.height // 2

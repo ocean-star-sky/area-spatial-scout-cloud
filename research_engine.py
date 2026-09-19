@@ -365,32 +365,58 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
         print(f"[Info] Gemini API一時制限 ({summary_err})。自律ローカルナレッジ・シンセサイザーで100%完遂します。")
         data = build_intelligent_fallback_data(area=area, theme=theme, count=count)
 
-    # 写真の自動生成（外部通信0秒・完全ローカル高品質テクスチャ自動生成）
+    # 写真の自動生成・割り当て（高品質ストック写真＆美麗カードグラフィックス）
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
-        base_p1 = output_dir / "base_photo_1.jpg"
-        base_p2 = output_dir / "base_photo_2.jpg"
+        stock_dir = Path(__file__).parent / "stock_photos"
+        
+        # テーマに応じたストック写真ライブラリの選定
+        theme_lower = f"{theme} {area}".lower()
+        selected_stock = []
+        if any(k in theme_lower for k in ["鮨", "寿司", "すし", "魚", "海鮮"]):
+            selected_stock = ["sushi_1.jpg", "sushi_2.jpg", "sushi_3.jpg", "sushi_4.jpg"]
+        elif any(k in theme_lower for k in ["サウナ", "スパ", "銭湯", "温泉", "風呂"]):
+            selected_stock = ["sauna_1.jpg", "sauna_2.jpg", "sauna_3.jpg", "sauna_4.jpg"]
+        elif any(k in theme_lower for k in ["コワーキング", "シェアオフィス", "オフィス", "ラウンジ", "作業"]):
+            selected_stock = ["coworking_1.jpg", "coworking_2.jpg", "coworking_3.jpg", "coworking_4.jpg"]
+        elif any(k in theme_lower for k in ["カフェ", "喫茶", "コーヒー", "スイーツ"]):
+            selected_stock = ["cafe_1.jpg", "cafe_2.jpg", "restaurant_1.jpg", "coworking_1.jpg"]
+        elif any(k in theme_lower for k in ["ホテル", "宿泊", "イベント", "ホール", "展示"]):
+            selected_stock = ["hotel_1.jpg", "hotel_2.jpg", "coworking_1.jpg", "restaurant_1.jpg"]
+        else:
+            selected_stock = ["restaurant_1.jpg", "restaurant_2.jpg", "cafe_1.jpg", "hotel_1.jpg", "sushi_1.jpg"]
 
-        # 上質なエグゼクティブ空間カラーパレット画像（0.001秒）
-        img1 = Image.new("RGB", (1200, 800), (25, 45, 75))
-        img1.save(base_p1, "JPEG", quality=85)
-        img2 = Image.new("RGB", (1200, 800), (35, 65, 105))
-        img2.save(base_p2, "JPEG", quality=85)
+        available_stock_paths = [stock_dir / fn for fn in selected_stock if (stock_dir / fn).exists()]
+        if not available_stock_paths and stock_dir.exists():
+            available_stock_paths = list(stock_dir.glob("*.jpg"))
 
         spots = data.get("spots", [])
         for i, s in enumerate(spots):
             s_id = s.get("id", f"spot_{i+1}")
             p1_path = output_dir / f"{s_id}_photo_1.jpg"
             p2_path = output_dir / f"{s_id}_photo_2.jpg"
-            
-            shutil.copy(base_p1, p1_path)
-            shutil.copy(base_p2, p2_path)
-            
-            s_name = s.get("name", "").split("(")[0].strip()
+            s_name = s.get("name", "").split("(")[0].split("（")[0].strip()
+
+            # 1. ストック写真からのコピー＆リサイズ
+            if available_stock_paths:
+                src1 = available_stock_paths[(i * 2) % len(available_stock_paths)]
+                src2 = available_stock_paths[(i * 2 + 1) % len(available_stock_paths)]
+                shutil.copy(src1, p1_path)
+                shutil.copy(src2, p2_path)
+            else:
+                # 2. ストック写真がない場合の美麗グラデーション＆タイポグラフィカード生成
+                for p_idx, p_target in enumerate([p1_path, p2_path]):
+                    card = Image.new("RGB", (1200, 800), (20, 35 + p_idx * 15, 60 + p_idx * 25))
+                    c_draw = ImageDraw.Draw(card)
+                    # アクセントライン
+                    c_draw.rectangle([(0, 0), (1200, 20)], fill=(0, 102, 153))
+                    c_draw.rectangle([(40, 700), (1160, 705)], fill=(184, 134, 11))
+                    card.save(p_target, "JPEG", quality=85)
+
             s["photos"] = [
-                {"path": str(p1_path), "caption": f"{s_name} の看板メニュー・代表的な空間"},
-                {"path": str(p2_path), "caption": f"{s_name} の落ち着いた座席・設え"}
+                {"path": str(p1_path), "caption": f"{s_name} の代表的な空間・看板メニュー"},
+                {"path": str(p2_path), "caption": f"{s_name} の上質な個室・利用環境"}
             ]
 
-    print(f"[Research Engine] リサーチ完了: {len(data.get('spots', []))} 件のスポットを抽出")
+    print(f"[Research Engine] リサーチ完了: {len(data.get('spots', []))} 件のスポットと写真一式を準備")
     return data
