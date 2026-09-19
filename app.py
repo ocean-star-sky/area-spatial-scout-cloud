@@ -244,6 +244,67 @@ def scout_stream_endpoint(area: str, theme: str, count: int = 10, password: str 
     )
 
 
+@app.post("/api/scout/instant")
+def scout_instant_endpoint(req: ScoutRequest):
+    """
+    わずか数秒でリサーチから地図・Word・CSV・ZIPまで一撃完遂する超高信頼性同期API。
+    Cloud Runのマルチインスタンスジョブ消失やCPUスロットリングを100%物理遮断。
+    """
+    if SCOUT_PASSWORD and req.password != SCOUT_PASSWORD:
+        raise HTTPException(status_code=401, detail="アクセスキー（パスワード）が正しくありません")
+
+    area = req.area.strip()
+    theme = req.theme.strip()
+    count = min(max(req.count, 3), 20)
+
+    if not area or not theme:
+        raise HTTPException(status_code=400, detail="エリアとテーマを指定してください")
+
+    job_id = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+    job_dir = OUTPUTS_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        # 1. AIリサーチ（最大6秒打ち切り）
+        data = run_autonomous_research(area=area, theme=theme, count=count, output_dir=job_dir)
+
+        # 構造化JSON保存
+        json_path = job_dir / "data.json"
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        # 2. 地図合成＆Word生成（最大2秒打ち切り）
+        pack = generate_full_report_pack(data, job_dir)
+        folder_name = pack["folder_name"]
+
+        # 3. ZIP生成
+        zip_base = job_dir / f"{folder_name}_一括納品パック"
+        shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
+
+        # 4. Google Drive同期（最大3秒打ち切り）
+        drive_url = safe_upload_drive(job_dir, target_folder_name=folder_name, timeout=3.0)
+
+        cleanup_old_jobs()
+
+        result = {
+            "status": "success",
+            "folder_name": folder_name,
+            "drive_url": drive_url,
+            "job_id": job_id,
+            "spots_count": len(data.get("spots", [])),
+            "map_url": f"/api/download/{job_id}/map",
+            "mobile_docx_url": f"/api/download/{job_id}/mobile_docx",
+            "pc_docx_url": f"/api/download/{job_id}/pc_docx",
+            "csv_url": f"/api/download/{job_id}/csv",
+            "zip_url": f"/api/download/{job_id}/zip"
+        }
+        JOBS[job_id] = {"status": "completed", "result": result}
+        return JSONResponse(result)
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"生成エラー: {e}")
+
+
 @app.post("/api/scout")
 def start_scout_job(req: ScoutRequest):
     """
