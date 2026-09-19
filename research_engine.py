@@ -322,81 +322,34 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
     # 無料枠で最も安定・大容量な gemini-2.5-flash / flash-lite
     candidate_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
 
-    def fetch_gemini():
-        # 1. Google GenAI 公式 SDK (google-genai) による試行
-        if GENAI_AVAILABLE:
-            try:
-                client = genai.Client(api_key=key.strip())
-                for model in candidate_models:
-                    try:
-                        config = types.GenerateContentConfig(
-                            temperature=0.2,
-                            max_output_tokens=5000
-                        )
-                        resp = client.models.generate_content(
-                            model=model,
-                            contents=prompt,
-                            config=config
-                        )
-                        if resp.text:
-                            print(f"[Research Engine] google-genai SDK: モデル '{model}' でリサーチ成功！")
-                            return resp.text.strip()
-                    except Exception as e:
-                        all_errors.append(f"SDK {model}: {e}")
-            except Exception as sdk_init_err:
-                all_errors.append(f"SDK Client初期化エラー: {sdk_init_err}")
-
-        # 2. REST API 直接呼び出しによるフォールバック (タイムアウト3.5秒)
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 5000}
-        }
-        for model in candidate_models:
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key.strip()}"
-            try:
-                req = urllib.request.Request(
-                    url,
-                    data=json.dumps(payload).encode("utf-8"),
-                    headers={"Content-Type": "application/json"},
-                    method="POST"
-                )
-                with urllib.request.urlopen(req, timeout=3.5) as res:
-                    res_json = json.loads(res.read().decode("utf-8"))
-                    candidates = res_json.get("candidates", [])
-                    if candidates:
-                        parts = candidates[0].get("content", {}).get("parts", [])
-                        if parts:
-                            t = "".join(p.get("text", "") for p in parts if "text" in p).strip()
-                            if t:
-                                print(f"[Research Engine] REST API: モデル '{model}' でリサーチ成功！")
-                                return t
-            except Exception as e:
-                all_errors.append(f"REST {model}: {e}")
-
-        return None
-
-    # 厳格な3.0秒デーモンスレッド強制タイムアウト
-    thread_res = [None]
-    thread_err = [None]
-
-    def worker_thread():
+    # 純粋な標準ソケット通信（urllib.request）によるGemini REST API直接呼び出し（厳格な2.0秒タイムアウト）
+    # ※ google-genai SDK や gRPC によるC言語レベルのGILロック・フリーズを100%完全根絶
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4000}
+    }
+    for model in candidate_models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key.strip()}"
         try:
-            thread_res[0] = fetch_gemini()
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=2.0) as res:
+                res_json = json.loads(res.read().decode("utf-8"))
+                candidates = res_json.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        t = "".join(p.get("text", "") for p in parts if "text" in p).strip()
+                        if t:
+                            print(f"[Research Engine] REST API: モデル '{model}' でリサーチ成功！")
+                            text_resp = t
+                            break
         except Exception as e:
-            thread_err[0] = e
-
-    t = threading.Thread(target=worker_thread, daemon=True)
-    t.start()
-    t.join(timeout=3.0)
-
-    if t.is_alive():
-        print("[Info] Gemini API通信が3.0秒を超えたため、即座に高速自律ナレッジエンジンに切り替えます。")
-        text_resp = None
-    elif thread_err[0]:
-        print(f"[Info] Gemini API処理例外 ({thread_err[0]})。高速自律ナレッジエンジンに切り替えます。")
-        text_resp = None
-    else:
-        text_resp = thread_res[0]
+            all_errors.append(f"REST {model}: {e}")
 
     # 3. JSON抽出またはインテリジェント・フォールバック
     data = None
