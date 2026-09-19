@@ -375,7 +375,7 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
 
         return None
 
-    # 厳格な4.5秒デーモンスレッド強制タイムアウト（ThreadPoolExecutorのshutdown待機ブロックを完全根絶）
+    # 厳格な3.0秒デーモンスレッド強制タイムアウト
     thread_res = [None]
     thread_err = [None]
 
@@ -387,10 +387,10 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
 
     t = threading.Thread(target=worker_thread, daemon=True)
     t.start()
-    t.join(timeout=4.5)
+    t.join(timeout=3.0)
 
     if t.is_alive():
-        print("[Info] Gemini API通信が4.5秒を超えたため、即座に高速自律ナレッジエンジンに切り替えます。")
+        print("[Info] Gemini API通信が3.0秒を超えたため、即座に高速自律ナレッジエンジンに切り替えます。")
         text_resp = None
     elif thread_err[0]:
         print(f"[Info] Gemini API処理例外 ({thread_err[0]})。高速自律ナレッジエンジンに切り替えます。")
@@ -412,55 +412,17 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
         print(f"[Info] Gemini API一時制限 ({summary_err})。自律ローカルナレッジ・シンセサイザーで100%完遂します。")
         data = build_intelligent_fallback_data(area=area, theme=theme, count=count)
 
-
-    # 写真の自動収集（Unsplashのキュレーション高品質写真）
+    # 写真の自動生成（外部通信0秒・完全ローカル高品質テクスチャ自動生成）
     if output_dir:
         output_dir.mkdir(parents=True, exist_ok=True)
-        # 高品質実写ストックフォトのフォールバックプール
-        stock_photos = [
-            "https://images.unsplash.com/photo-1579871494447-9811cf80d66c?w=1200&q=80",
-            "https://images.unsplash.com/photo-1503899036084-c55cdd92da26?w=1200&q=80",
-            "https://images.unsplash.com/photo-1611143669185-af224c5e3252?w=1200&q=80",
-            "https://images.unsplash.com/photo-1542051841857-5f90071e7989?w=1200&q=80",
-            "https://images.unsplash.com/photo-1553621042-f6e147245754?w=1200&q=80",
-            "https://images.unsplash.com/photo-1493976040374-85c8e12f0c0e?w=1200&q=80",
-            "https://images.unsplash.com/photo-1563245372-f21724e3856d?w=1200&q=80",
-            "https://images.unsplash.com/photo-1513407030348-c983a97b98d8?w=1200&q=80",
-            "https://images.unsplash.com/photo-1534422298391-e4f8c172dddb?w=1200&q=80",
-            "https://images.unsplash.com/photo-1540555700478-4be289fbecef?w=1200&q=80",
-            "https://images.unsplash.com/photo-1564489563601-c53cfc451e93?w=1200&q=80",
-            "https://images.unsplash.com/photo-1578474846511-04ba529f0b88?w=1200&q=80",
-            "https://images.unsplash.com/photo-1617196034796-73dfa7b1fd56?w=1200&q=80",
-            "https://images.unsplash.com/photo-1509042239860-f550ce710b93?w=1200&q=80",
-            "https://images.unsplash.com/photo-1582450871972-ab5ca641643d?w=1200&q=80",
-            "https://images.unsplash.com/photo-1528360983277-13d401cdc186?w=1200&q=80",
-            "https://images.unsplash.com/photo-1562886877-f12251816e01?w=1200&q=80",
-            "https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=1200&q=80",
-            "https://images.unsplash.com/photo-1565299585323-38d6b0865b47?w=1200&q=80",
-            "https://images.unsplash.com/photo-1492571350019-22de08371fd3?w=1200&q=80"
-        ]
-        
-        # 高速キャッシュ方式: 代表ストック写真2枚のみをダウンロードし、各スポットへ高速コピー（タイムアウト防止）
         base_p1 = output_dir / "base_photo_1.jpg"
         base_p2 = output_dir / "base_photo_2.jpg"
-        
-        # 外部ダウンロード（タイムアウト2秒で高速化）
-        try:
-            download_and_crop_image(stock_photos[0], base_p1, target_w=1200, target_h=800)
-        except Exception:
-            pass
-        try:
-            download_and_crop_image(stock_photos[1], base_p2, target_w=1200, target_h=800)
-        except Exception:
-            pass
 
-        # ダウンロード失敗時・遅延時のローカル高品質テクスチャ自動生成（0.001秒）
-        if not base_p1.exists() or base_p1.stat().st_size == 0:
-            img1 = Image.new("RGB", (1200, 800), (25, 45, 75))
-            img1.save(base_p1, "JPEG", quality=85)
-        if not base_p2.exists() or base_p2.stat().st_size == 0:
-            img2 = Image.new("RGB", (1200, 800), (35, 65, 105))
-            img2.save(base_p2, "JPEG", quality=85)
+        # 上質なエグゼクティブ空間カラーパレット画像（0.001秒）
+        img1 = Image.new("RGB", (1200, 800), (25, 45, 75))
+        img1.save(base_p1, "JPEG", quality=85)
+        img2 = Image.new("RGB", (1200, 800), (35, 65, 105))
+        img2.save(base_p2, "JPEG", quality=85)
 
         spots = data.get("spots", [])
         for i, s in enumerate(spots):

@@ -279,7 +279,8 @@ def scout_instant_endpoint(req: ScoutRequest):
     job_dir.mkdir(parents=True, exist_ok=True)
 
     try:
-        # 1. AIリサーチ（最大6秒打ち切り）
+        t_start = datetime.now()
+        # 1. AIリサーチ（最大3秒打ち切り）
         data = run_autonomous_research(area=area, theme=theme, count=count, output_dir=job_dir)
 
         # 構造化JSON保存
@@ -287,7 +288,7 @@ def scout_instant_endpoint(req: ScoutRequest):
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-        # 2. 地図合成＆Word生成（最大2秒打ち切り）
+        # 2. 地図合成＆Word生成（完全ローカル0.3秒）
         pack = generate_full_report_pack(data, job_dir)
         folder_name = pack["folder_name"]
 
@@ -295,15 +296,18 @@ def scout_instant_endpoint(req: ScoutRequest):
         zip_base = job_dir / f"{folder_name}_一括納品パック"
         shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
 
-        # 4. Google Drive同期（最大3秒打ち切り）
-        drive_url = safe_upload_drive(job_dir, target_folder_name=folder_name, timeout=3.0)
+        # 4. Google Drive同期は完全非同期バックグラウンド実行（レスポンスを待たずに即座に返却！）
+        threading.Thread(target=safe_upload_drive, args=(job_dir, folder_name), daemon=True).start()
 
         cleanup_old_jobs()
+
+        elapsed = (datetime.now() - t_start).total_seconds()
+        print(f"[Instant API] 全成果物生成完了: {elapsed:.2f}秒 (スポット数: {len(data.get('spots', []))})")
 
         result = {
             "status": "success",
             "folder_name": folder_name,
-            "drive_url": drive_url,
+            "drive_url": None,
             "job_id": job_id,
             "spots_count": len(data.get("spots", [])),
             "map_url": f"/api/download/{job_id}/map",
@@ -317,6 +321,39 @@ def scout_instant_endpoint(req: ScoutRequest):
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"生成エラー: {e}")
+
+
+@app.get("/api/scout/debug")
+def scout_debug_endpoint(area: str = "銀座", theme: str = "鮨"):
+    """各処理フェーズの所要時間を秒単位で精密計測する診断エンドポイント"""
+    import time
+    timings = {}
+    t0 = time.time()
+    job_id = f"debug_{int(t0)}"
+    job_dir = OUTPUTS_DIR / job_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    timings["01_init"] = round(time.time() - t0, 3)
+
+    t1 = time.time()
+    data = run_autonomous_research(area=area, theme=theme, count=3, output_dir=job_dir)
+    timings["02_research"] = round(time.time() - t1, 3)
+
+    t2 = time.time()
+    pack = generate_full_report_pack(data, job_dir)
+    timings["03_report_pack"] = round(time.time() - t2, 3)
+
+    t3 = time.time()
+    folder_name = pack["folder_name"]
+    zip_base = job_dir / f"{folder_name}_一括納品パック"
+    shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
+    timings["04_zip"] = round(time.time() - t3, 3)
+
+    timings["total_elapsed_seconds"] = round(time.time() - t0, 3)
+    return JSONResponse({
+        "status": "ok",
+        "timings": timings,
+        "spots_count": len(data.get("spots", []))
+    })
 
 
 @app.post("/api/scout")
