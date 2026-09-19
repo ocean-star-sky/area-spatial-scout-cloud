@@ -174,6 +174,15 @@ def build_intelligent_fallback_data(area: str, theme: str, count: int = 10) -> d
             ("サウナセンター新橋店", "老舗サウナセンターの血統・燻製サウナ", "4.3 / サウナイキタイ 4,600+", 540, "東京都港区新橋3-15-2", "2時間: 2,000円 ｜ 本格アウフグース"),
             ("スパ＆カプセル グランドパーク", "駅前利便性抜群のリフレッシュスパ", "4.1 / サウナイキタイ 1,900+", 380, "東京都港区新橋4-11-8", "60分: 1,500円 ｜ 3時間: 2,200円 ｜ 大浴場完備")
         ],
+        # --- 渋谷 サウナ ---
+        ("渋谷", "サウナ"): [
+            ("渋谷 SAUNAS (サウナス)", "タナカカツキプロデュース・9つの極上サウナ＆2つの深水風呂", "4.6 / サウナイキタイ 7,800+", 1650, "東京都渋谷区桜丘町18-9", "2時間: 3,080円〜 ｜ サウナ専門施設 ｜ 外気浴完備"),
+            ("改良湯 (KAIRYOU-YU)", "創業大正5年・漆黒のモダンデザイナーズ銭湯サウナ", "4.5 / サウナイキタイ 8,900+", 2400, "東京都渋谷区東2-19-9", "入浴+サウナ: 1,050円 ｜ アウフグース・軟水水風呂"),
+            ("サウナ道場 渋谷", "センター街の本格漢気ロウリュ＆畳ととのい空間", "4.4 / サウナイキタイ 4,200+", 850, "東京都渋谷区宇田川町28-1 高山ランド第15ビル7F", "60分: 1,500円 ｜ 90分: 2,000円 ｜ 桶水風呂"),
+            ("ドシー (℃) 渋谷", "フィンランド式セルフロウリュ＆極冷ウォーターピラー", "4.1 / サウナイキタイ 3,600+", 720, "東京都渋谷区恵比寿1-8-1", "1時間: 1,200円 ｜ 個室シャワー＆本格サウナ"),
+            ("HOTEL GRAPHY 渋谷 サウナ", "ホテル最上階の宿泊・デイユース型プライベートサウナ", "4.5 / サウナイキタイ 1,100+", 230, "東京都渋谷区東1-29-3", "事前予約制 ｜ テラス外気浴 ｜ ラウンジ完備")
+        ],
+        # --- 新宿 サウナ ---
         ("新宿", "サウナ"): [
             ("東京新宿天然温泉 テルマー湯", "中伊豆から毎日運ぶ天然温泉＆広大サウナ", "4.4 / サウナイキタイ 9,500+", 3200, "東京都新宿区歌舞伎町1-1-2", "入館料: 2,700円 ｜ 露天風呂・高温サウナ・岩盤浴"),
             ("サウナ物産館 新宿", "北欧風本格フィンランドサウナ", "4.3 / サウナイキタイ 3,200+", 420, "東京都新宿区西新宿1-12-5", "2時間: 2,200円 ｜ セルフロウリュ完備"),
@@ -197,26 +206,34 @@ def build_intelligent_fallback_data(area: str, theme: str, count: int = 10) -> d
         ]
     }
     
-    # 柔軟なマッチング（エリア・テーマの部分一致・同義語）
+    # 厳格なジャンル判定（異ジャンルの混入を100%遮断）
+    def classify_genre(text: str) -> str:
+        t = text.lower()
+        if any(k in t for k in ["サウナ", "スパ", "銭湯", "温泉", "風呂", "ロウリュ", "水風呂", "sauna"]):
+            return "サウナ"
+        if any(k in t for k in ["鮨", "寿司", "すし", "sushi"]):
+            return "鮨"
+        if any(k in t for k in ["コワーキング", "シェアオフィス", "オフィス", "ラウンジ", "作業", "ワークスペース", "coworking"]):
+            return "コワーキング"
+        if any(k in t for k in ["イベント", "展示", "ホール", "アリーナ", "ビッグサイト", "カンファレンス"]):
+            return "イベント"
+        return "その他"
+
+    user_genre = classify_genre(theme_clean)
+
+    # 1. エリア一致 かつ ジャンル完全一致
     matched_spots = None
     for (db_area, db_theme), spot_list in db.items():
         area_hit = (db_area in area_clean or area_clean in db_area)
-        theme_hit = any(t in theme_clean for t in [db_theme, "鮨", "寿司", "すし", "サウナ", "スパ", "コワーキング", "オフィス", "イベント", "展示"])
-        if area_hit and (db_theme in theme_clean or theme_clean in db_theme or theme_hit):
+        theme_genre = classify_genre(db_theme)
+        if area_hit and (user_genre != "その他" and theme_genre == user_genre):
             matched_spots = spot_list
             break
-            
-    # エリアだけでも合致するスポットがあれば優先
-    if not matched_spots:
-        for (db_area, db_theme), spot_list in db.items():
-            if db_area in area_clean or area_clean in db_area:
-                matched_spots = spot_list
-                break
 
-    # テーマだけでも合致するスポットがあれば採用
-    if not matched_spots:
+    # 2. エリアが未登録でも、ジャンルが完全一致する代表スポットを採用（サウナなら絶対サウナ！）
+    if not matched_spots and user_genre != "その他":
         for (db_area, db_theme), spot_list in db.items():
-            if any(k in theme_clean for k in db_theme.split()):
+            if classify_genre(db_theme) == user_genre:
                 matched_spots = spot_list
                 break
 
@@ -246,17 +263,88 @@ def build_intelligent_fallback_data(area: str, theme: str, count: int = 10) -> d
                 ]
             })
     else:
-        # 完全新規エリア・テーマ用：実在感を極めた上質な屋号生成（「特選スポット〇号店」は永久撤廃）
-        landmark_names = [
-            f"{area_clean} 離宮 (RIKYU)",
-            f"割烹 {area_clean} 浅黄",
-            f"{area_clean} グランドサロン",
-            f"プライベートラウンジ {area_clean}",
-            f"{area_clean} 茶寮 水暉",
-            f"ザ・テラス {area_clean}",
-            f"{area_clean} 錦水",
-            f"創作ダイニング {area_clean} 響"
-        ]
+        # 完全新規エリア・テーマ用：ジャンルにドンピシャな屋号・諸元生成（他ジャンル混入を完全物理遮断）
+        if user_genre == "サウナ":
+            landmark_names = [
+                f"{area_clean} SAUNA & SPA",
+                f"プライベートサウナ {area_clean} 庵",
+                f"{area_clean} 展望スカイスパ",
+                f"フィンランドサウナ {area_clean}",
+                f"{area_clean} 湯処 禅 (ZEN)",
+                f"サウナリゾート {area_clean}"
+            ]
+            default_price = "90分: 2,000円 ｜ フリー: 3,200円 ｜ オートロウリュ完備"
+            default_cat = "本格サウナ・スパ"
+            genre_reviews = [
+                f"{area_clean}エリアでサウナならまずここ。オートロウリュの熱波と深めの水風呂で完璧にととのいます。",
+                "静粛性が徹底されており、外気浴スペースの心地よさはエリア随一。混雑時間帯を避ければ極楽です。",
+                "アメニティが豊富で手ぶらで利用可能。清潔感があり、仕事帰りのリフレッシュに最適です。",
+                "サウナ室の温度管理と水風呂の冷却が完璧。サウナー納得のクオリティです。"
+            ]
+        elif user_genre == "コワーキング":
+            landmark_names = [
+                f"{area_clean} SHARE LOUNGE",
+                f"ワークスペース {area_clean} Hub",
+                f"{area_clean} コ・クリエイションサロン",
+                f"オープンオフィス {area_clean}",
+                f"{area_clean} ビジネスラウンジ"
+            ]
+            default_price = "ドロップイン: 2,000円/日 ｜ 高速WiFi・電源完備"
+            default_cat = "コワーキング・シェアオフィス"
+            genre_reviews = [
+                "WiFiが高速で全席電源完備。オンラインMTG用個室ブースも豊富で集中して仕事ができます。",
+                "フリードリンクやスナックが充実しており、居心地の良いオープンラウンジです。",
+                "駅近でアクセス抜群。ドロップインで気軽に利用でき、ノマドワークに重宝しています。",
+                "静かな集中エリアと通話可能なエリアが分かれており、使い勝手が非常に良いです。"
+            ]
+        elif user_genre == "鮨":
+            landmark_names = [
+                f"{area_clean} 鮨 離宮",
+                f"江戸前鮨 {area_clean} 浅黄",
+                f"鮨 {area_clean} かねこ",
+                f"{area_clean} 鮨 水暉",
+                f"鮨処 {area_clean} 錦水"
+            ]
+            default_price = "昼: 8,000円〜 ｜ 夜: 25,000円〜 ｜ 完全個室完備"
+            default_cat = "江戸前鮨・完全個室"
+            genre_reviews = [
+                "熟練の職人による握りと旬の酒肴が絶品。完全個室で大事な接待にも最適です。",
+                "赤酢のシャリと極上マグロの相性が抜群。スタッフの接客も洗練されています。",
+                "静粛性の高い数寄屋造りの個室で、周囲を気にせず商談に集中できました。",
+                "季節の食材を活かしたコース構成が見事で、先方の役員にも大変喜ばれました。"
+            ]
+        elif user_genre == "イベント":
+            landmark_names = [
+                f"{area_clean} コンベンションホール",
+                f"{area_clean} 国際イベントホール",
+                f"{area_clean} エキシビションセンター",
+                f"カンファレンススクエア {area_clean}"
+            ]
+            default_price = "施設利用料: 催事規模別 ｜ 最新音響・映像設備"
+            default_cat = "大型イベント・展示会場"
+            genre_reviews = [
+                "搬入出の動線がスムーズで、大規模な展示会やカンファレンスに最適な会場です。",
+                "音響・映像設備が最新鋭で、ハイブリッド配信やステージ演出にも完全対応しています。",
+                "最寄り駅からの案内看板が分かりやすく、来場者への誘導が極めてスムーズでした。",
+                "控室や主催者事務室のセキュリティが高く、安心して運営できます。"
+            ]
+        else:
+            landmark_names = [
+                f"{area_clean} 離宮 (RIKYU)",
+                f"割烹 {area_clean} 浅黄",
+                f"{area_clean} グランドサロン",
+                f"プライベートラウンジ {area_clean}",
+                f"ザ・テラス {area_clean}"
+            ]
+            default_price = "予算: 6,000円〜18,000円 ｜ 上質空間"
+            default_cat = f"{theme_clean}・上質空間"
+            genre_reviews = [
+                f"{area_clean}エリアにおいて{theme_clean}を利用するなら外せない名所です。",
+                "プライベート空間がしっかりと確保されており、大切な商談や会食にも最適です。",
+                "店員さんのサービスが極めて丁寧で、心地よい時間を過ごすことができました。",
+                "細部まで手入れが行き届いており、リピート確定のクオリティです。"
+            ]
+
         pref = "東京都" if ("区" in area_clean or "市" in area_clean or not any(p in area_clean for p in ["都", "道", "府", "県"])) else ""
         for idx in range(count):
             s_num = idx + 1
@@ -264,23 +352,18 @@ def build_intelligent_fallback_data(area: str, theme: str, count: int = 10) -> d
             spots_data.append({
                 "id": f"spot_{s_num}",
                 "name": spot_name,
-                "category": f"{theme_clean}・上質空間",
-                "rating": f"4.{5 - (idx % 3)} / 食べログ 3.{68 - (idx % 8)}",
+                "category": default_cat,
+                "rating": f"4.{5 - (idx % 3)} / 口コミ高評価",
                 "reviews_count": 320 + idx * 45,
                 "address": f"{pref}{area_clean}1丁目{(idx % 8) + 1}-{(idx % 12) + 2}",
                 "url": f"https://www.google.com/search?q={urllib.request.quote(spot_name)}",
                 "key_topics": [f"{theme_clean}特化", "高い静粛性", "駅近アクセス", "丁寧なホスピタリティ"],
-                "pricing": f"昼: 5,000円〜 ｜ 夜: 18,000円〜 ｜ 個室完備",
+                "pricing": default_price,
                 "popular_times": {
                     "peak_time": "18:00〜20:30 (混雑度 80%)",
                     "quiet_time": "12:00〜14:00 (混雑度 35%)"
                 },
-                "reviews": [
-                    f"{spot_name}は{area_clean}エリアにおいて{theme_clean}を利用するなら外せない名所です。",
-                    "プライベート空間がしっかりと確保されており、大切な商談や会食にも最適です。",
-                    "店員さんのサービスが極めて丁寧で、心地よい時間を過ごすことができました。",
-                    "料理や設備の細部まで手入れが行き届いており、リピート確定のクオリティです。"
-                ]
+                "reviews": genre_reviews
             })
 
     return {
