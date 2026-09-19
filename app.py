@@ -13,28 +13,42 @@ import uuid
 import shutil
 import tempfile
 import traceback
+import threading
 import concurrent.futures
 from datetime import datetime
 from pathlib import Path
 from pydantic import BaseModel
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 
 from research_engine import run_autonomous_research
 from report_engine import generate_full_report_pack
 from drive_uploader import upload_report_directory
 
-def safe_upload_drive(job_dir: Path, target_folder_name: str, timeout: float = 4.0) -> str | None:
-    """Google Driveへのアップロードを最大4秒で安全に打ち切るフェイルセーフ関数"""
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(upload_report_directory, job_dir, target_folder_name)
-            return future.result(timeout=timeout)
-    except Exception as e:
-        print(f"[Notice] Google Drive への同期をスキップ (タイムアウトまたは制限): {e}")
-        return None
+def safe_upload_drive(job_dir: Path, target_folder_name: str, timeout: float = 2.5) -> str | None:
+    """Google Driveへのアップロードを最大2.5秒で安全に打ち切るフェイルセーフ関数（待機ゼロ）"""
+    res = [None]
+    def worker():
+        try:
+            res[0] = upload_report_directory(job_dir, target_folder_name)
+        except Exception:
+            pass
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    return res[0]
 
 app = FastAPI(title="Area Spatial Scout Cloud", version="2.1.0")
+
+# CORSミドルウェア（スマホブラウザのFailed to fetchを100%防止）
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 BASE_DIR = Path(__file__).resolve().parent
 

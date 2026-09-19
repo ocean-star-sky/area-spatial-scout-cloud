@@ -359,7 +359,7 @@ def generate_spots_map_image(spots: list[dict], output_path: Path, area: str = "
     for gy in range(0, map_img.height, 64):
         grid_draw.line([(0, gy), (map_img.width, gy)], fill=(225, 232, 242), width=1)
 
-    # 3. タイル画像の並列ダウンロード（最大8スレッド・全体2.0秒タイムアウト打ち切り）
+    # 3. タイル画像の並列ダウンロード（グローバルプール使用によりshutdown待機ブロックを完全排除・最大1.5秒打ち切り）
     tile_tasks = []
     for tx in range(tile_x_start, tile_x_end + 1):
         for ty in range(tile_y_start, tile_y_end + 1):
@@ -370,25 +370,27 @@ def generate_spots_map_image(spots: list[dict], output_path: Path, area: str = "
         tile_url = f"https://cyberjapandata.gsi.go.jp/xyz/std/{zoom}/{tx}/{ty}.png"
         req = urllib.request.Request(tile_url, headers={"User-Agent": "AntigravityMapScout/2.0"})
         try:
-            with urllib.request.urlopen(req, timeout=1.2) as res:
+            with urllib.request.urlopen(req, timeout=1.0) as res:
                 return (tx, ty, res.read())
         except Exception:
             return (tx, ty, None)
 
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
-            futures = [executor.submit(fetch_tile, c) for c in tile_tasks]
-            done, _ = concurrent.futures.wait(futures, timeout=2.0)
-            for f in done:
-                try:
-                    tx, ty, tdata = f.result()
-                    if tdata:
-                        timg = Image.open(io.BytesIO(tdata)).convert("RGB")
-                        px_t = (tx - tile_x_start) * 256
-                        py_t = (ty - tile_y_start) * 256
-                        map_img.paste(timg, (px_t, py_t))
-                except Exception:
-                    pass
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+        futures = [executor.submit(fetch_tile, c) for c in tile_tasks]
+        done, _ = concurrent.futures.wait(futures, timeout=1.5)
+        for f in done:
+            try:
+                tx, ty, tdata = f.result()
+                if tdata:
+                    timg = Image.open(io.BytesIO(tdata)).convert("RGB")
+                    px_t = (tx - tile_x_start) * 256
+                    py_t = (ty - tile_y_start) * 256
+                    map_img.paste(timg, (px_t, py_t))
+            except Exception:
+                pass
+        # wait=False で即座に解放（実行中スレッドの完了を絶対に待たない）
+        executor.shutdown(wait=False, cancel_futures=True)
     except Exception as e:
         print(f"[Info] タイル並列取得スキップ（ローカルグリッドマップで継続）: {e}")
 

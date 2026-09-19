@@ -11,6 +11,7 @@ import os
 import re
 import json
 import shutil
+import threading
 import urllib.request
 import concurrent.futures
 from datetime import datetime
@@ -374,15 +375,28 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
 
         return None
 
-    # 厳格な6秒タイムアウト制御でブロックを物理根絶
-    try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(fetch_gemini)
-            text_resp = future.result(timeout=6.0)
-    except concurrent.futures.TimeoutError:
-        print("[Info] Gemini API通信が6秒を超えたため、即座に高速自律ナレッジエンジンに切り替えます。")
-    except Exception as exec_err:
-        print(f"[Info] Gemini API処理例外 ({exec_err})。高速自律ナレッジエンジンに切り替えます。")
+    # 厳格な4.5秒デーモンスレッド強制タイムアウト（ThreadPoolExecutorのshutdown待機ブロックを完全根絶）
+    thread_res = [None]
+    thread_err = [None]
+
+    def worker_thread():
+        try:
+            thread_res[0] = fetch_gemini()
+        except Exception as e:
+            thread_err[0] = e
+
+    t = threading.Thread(target=worker_thread, daemon=True)
+    t.start()
+    t.join(timeout=4.5)
+
+    if t.is_alive():
+        print("[Info] Gemini API通信が4.5秒を超えたため、即座に高速自律ナレッジエンジンに切り替えます。")
+        text_resp = None
+    elif thread_err[0]:
+        print(f"[Info] Gemini API処理例外 ({thread_err[0]})。高速自律ナレッジエンジンに切り替えます。")
+        text_resp = None
+    else:
+        text_resp = thread_res[0]
 
     # 3. JSON抽出またはインテリジェント・フォールバック
     data = None
