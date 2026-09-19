@@ -69,15 +69,32 @@ async def health_check():
 JOBS = {}
 
 
+def update_job_status(job_id: str, job_dir: Path, status: str, progress: int, step: str, detail: str, result=None, error=None):
+    """メモリとディスク(status.json)の両方に進捗を同期保存"""
+    payload = {
+        "status": status,
+        "job_id": job_id,
+        "progress": progress,
+        "step": step,
+        "detail": detail
+    }
+    if result:
+        payload["result"] = result
+    if error:
+        payload["error"] = error
+    JOBS[job_id] = payload
+    try:
+        with open(job_dir / "status.json", "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+    except Exception:
+        pass
+    return payload
+
+
 def background_scout_task(job_id: str, area: str, theme: str, count: int, job_dir: Path):
     """別スレッドで安全に実行される非同期リサーチ・レポート生成ワーカー"""
     try:
-        JOBS[job_id] = {
-            "status": "processing",
-            "progress": 25,
-            "step": "AIリサーチ＆スポット抽出中...",
-            "detail": "Gemini高度AIモデルが最新の口コミ・住所・営業情報を自律リサーチ中"
-        }
+        update_job_status(job_id, job_dir, "processing", 20, "AIリサーチ＆スポット抽出中...", "Gemini高度AIモデルが最新の口コミ・住所・営業情報を自律リサーチ中")
         data = run_autonomous_research(area=area, theme=theme, count=count, output_dir=job_dir)
 
         # 構造化JSONを保存
@@ -85,12 +102,7 @@ def background_scout_task(job_id: str, area: str, theme: str, count: int, job_di
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
-        JOBS[job_id] = {
-            "status": "processing",
-            "progress": 65,
-            "step": "地図合成＆デュアルWord生成中...",
-            "detail": "国土地理院プロット地図とスマホ専用Wordを作成中"
-        }
+        update_job_status(job_id, job_dir, "processing", 60, "地図合成＆デュアルWord生成中...", "国土地理院プロット地図とスマホ専用Wordを作成中")
         pack = generate_full_report_pack(data, job_dir)
         folder_name = pack["folder_name"]
 
@@ -98,12 +110,7 @@ def background_scout_task(job_id: str, area: str, theme: str, count: int, job_di
         zip_base = job_dir / f"{folder_name}_一括納品パック"
         shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
 
-        JOBS[job_id] = {
-            "status": "processing",
-            "progress": 90,
-            "step": "成果物を保存中...",
-            "detail": "ダウンロードリンクとGoogleドライブ保存を処理中"
-        }
+        update_job_status(job_id, job_dir, "processing", 90, "成果物を保存中...", "ダウンロードリンクとGoogleドライブ保存を処理中")
         drive_url = None
         try:
             drive_url = upload_report_directory(job_dir, target_folder_name=folder_name)
@@ -112,30 +119,23 @@ def background_scout_task(job_id: str, area: str, theme: str, count: int, job_di
 
         cleanup_old_jobs()
 
-        JOBS[job_id] = {
-            "status": "completed",
-            "progress": 100,
-            "step": "レポート生成完了！",
-            "detail": "すべての成果物の準備が整いました",
-            "result": {
-                "status": "success",
-                "folder_name": folder_name,
-                "drive_url": drive_url,
-                "job_id": job_id,
-                "spots_count": len(data.get("spots", [])),
-                "map_url": f"/api/download/{job_id}/map",
-                "mobile_docx_url": f"/api/download/{job_id}/mobile_docx",
-                "pc_docx_url": f"/api/download/{job_id}/pc_docx",
-                "csv_url": f"/api/download/{job_id}/csv",
-                "zip_url": f"/api/download/{job_id}/zip"
-            }
+        result_payload = {
+            "status": "success",
+            "folder_name": folder_name,
+            "drive_url": drive_url,
+            "job_id": job_id,
+            "spots_count": len(data.get("spots", [])),
+            "map_url": f"/api/download/{job_id}/map",
+            "mobile_docx_url": f"/api/download/{job_id}/mobile_docx",
+            "pc_docx_url": f"/api/download/{job_id}/pc_docx",
+            "csv_url": f"/api/download/{job_id}/csv",
+            "zip_url": f"/api/download/{job_id}/zip"
         }
+
+        update_job_status(job_id, job_dir, "completed", 100, "レポート生成完了！", "すべての成果物の準備が整いました", result=result_payload)
     except Exception as e:
         traceback.print_exc()
-        JOBS[job_id] = {
-            "status": "failed",
-            "error": str(e)
-        }
+        update_job_status(job_id, job_dir, "failed", 0, "生成エラー", str(e), error=str(e))
 
 
 def stream_scout_generator(area: str, theme: str, count: int, password: str = ""):
