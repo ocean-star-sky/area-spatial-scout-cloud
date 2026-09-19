@@ -132,6 +132,20 @@ def extract_json_from_text(text: str) -> dict:
         except Exception:
             pass
 
+def classify_genre(text: str) -> str:
+    """厳格なジャンル判定 — 異ジャンルの混入を100%遮断するモジュールレベル関数"""
+    t = text.lower()
+    if any(k in t for k in ["サウナ", "スパ", "銭湯", "温泉", "風呂", "ロウリュ", "水風呂", "sauna"]):
+        return "サウナ"
+    if any(k in t for k in ["鮨", "寿司", "すし", "sushi"]):
+        return "鮨"
+    if any(k in t for k in ["コワーキング", "シェアオフィス", "オフィス", "ラウンジ", "作業", "ワークスペース", "coworking"]):
+        return "コワーキング"
+    if any(k in t for k in ["イベント", "展示", "ホール", "アリーナ", "ビッグサイト", "カンファレンス"]):
+        return "イベント"
+    return "その他"
+
+
 def build_intelligent_fallback_data(area: str, theme: str, count: int = 10) -> dict:
     """Gemini APIの一時制限時にも、実在する有名・高評価スポットの固有名称を完全網羅して生成するマスターエンジン"""
     area_clean = area.strip()
@@ -169,7 +183,7 @@ def build_intelligent_fallback_data(area: str, theme: str, count: int = 10) -> d
             ("ライオンサウナ新橋", "二重扉サウナ＆氷水風呂（静寂空間）", "4.5 / サウナイキタイ 6,400+", 890, "東京都港区新橋2-15-14 新橋第2ビル", "1時間: 1,600円 ｜ 2時間: 2,300円 ｜ オートロウリュ"),
             ("安心お宿 新橋汐留店", "進化系カプセル＆人工温泉サウナ", "4.2 / サウナイキタイ 4,300+", 980, "東京都港区東新橋2-4-6", "90分: 1,800円 ｜ 3時間: 2,400円 ｜ 湯処＆足湯"),
             ("カンデオホテルズ東京新橋 (スカイスパ)", "最上階露天風呂＆展望ドライサウナ", "4.4 / サウナイキタイ 3,900+", 640, "東京都港区新橋3-6-8", "デイユース: 2,000円〜 ｜ 極上の外気浴"),
-            ("レンブラントキャビン＆スパ新橋", "コワーキング併設・スマートサウナ", "4.2 / サウナイキタイ 3,100+", 450, "東京都港区新橋2-5-7", "サウナ利用: 1,500円〜 ｜ 作業＆リフレッシュ"),
+            ("レンブラントキャビン＆スパ新橋", "カプセル併設・スマートサウナ", "4.2 / サウナイキタイ 3,100+", 450, "東京都港区新橋2-5-7", "サウナ利用: 1,500円〜 ｜ 作業＆リフレッシュ"),
             ("SHINBASHI SAUNA BASE", "完全個室ラグジュアリープライベートサウナ", "4.6 / サウナイキタイ 1,350+", 210, "東京都港区新橋1-10-1", "60分: 4,500円 ｜ 90分: 6,000円 ｜ 完全同伴可"),
             ("サウナセンター新橋店", "老舗サウナセンターの血統・燻製サウナ", "4.3 / サウナイキタイ 4,600+", 540, "東京都港区新橋3-15-2", "2時間: 2,000円 ｜ 本格アウフグース"),
             ("スパ＆カプセル グランドパーク", "駅前利便性抜群のリフレッシュスパ", "4.1 / サウナイキタイ 1,900+", 380, "東京都港区新橋4-11-8", "60分: 1,500円 ｜ 3時間: 2,200円 ｜ 大浴場完備")
@@ -206,18 +220,7 @@ def build_intelligent_fallback_data(area: str, theme: str, count: int = 10) -> d
         ]
     }
     
-    # 厳格なジャンル判定（異ジャンルの混入を100%遮断）
-    def classify_genre(text: str) -> str:
-        t = text.lower()
-        if any(k in t for k in ["サウナ", "スパ", "銭湯", "温泉", "風呂", "ロウリュ", "水風呂", "sauna"]):
-            return "サウナ"
-        if any(k in t for k in ["鮨", "寿司", "すし", "sushi"]):
-            return "鮨"
-        if any(k in t for k in ["コワーキング", "シェアオフィス", "オフィス", "ラウンジ", "作業", "ワークスペース", "coworking"]):
-            return "コワーキング"
-        if any(k in t for k in ["イベント", "展示", "ホール", "アリーナ", "ビッグサイト", "カンファレンス"]):
-            return "イベント"
-        return "その他"
+    # 厳格なジャンル判定（モジュールレベルの classify_genre() を使用）
 
     user_genre = classify_genre(theme_clean)
 
@@ -498,9 +501,29 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
         except Exception as parse_err:
             print(f"[Warning] AI応答のJSONパースに失敗 ({parse_err})。自律フォールバックを起動します。")
 
-    if not data or not data.get("spots"):
+    # 3.5. ★ Gemini API結果にもジャンル・ポストフィルタを適用（異ジャンル混入を100%遮断）
+    if data and data.get("spots"):
+        user_genre = classify_genre(theme)
+        if user_genre != "その他":
+            original_count = len(data["spots"])
+            # スポット名 + カテゴリで判定し、ユーザージャンルと矛盾しないもののみ残す
+            filtered = []
+            for s in data["spots"]:
+                spot_text = f"{s.get('name', '')} {s.get('category', '')}"
+                spot_genre = classify_genre(spot_text)
+                # その他（ジャンル判定不能）は許容、明確に別ジャンルのみ排除
+                if spot_genre == user_genre or spot_genre == "その他":
+                    filtered.append(s)
+                else:
+                    print(f"[Genre Filter] 異ジャンル排除: '{s.get('name', '?')}' (検出={spot_genre}, 要求={user_genre})")
+            data["spots"] = filtered
+            if len(filtered) < original_count:
+                print(f"[Genre Filter] {original_count}件→{len(filtered)}件 (異ジャンル{original_count - len(filtered)}件を排除)")
+
+    if not data or not data.get("spots") or len(data.get("spots", [])) < 3:
         summary_err = " | ".join(all_errors) if all_errors else "APIクォータ制限または応答解析エラー"
-        print(f"[Info] Gemini API一時制限 ({summary_err})。自律ローカルナレッジ・シンセサイザーで100%完遂します。")
+        reason = "Gemini結果不足/ジャンル不一致" if data and data.get("spots") else summary_err
+        print(f"[Info] {reason}。自律ローカルナレッジ・シンセサイザーで100%完遂します。")
         data = build_intelligent_fallback_data(area=area, theme=theme, count=count)
 
     # 写真の自動生成・割り当て（高品質ストック写真＆美麗カードグラフィックス）
