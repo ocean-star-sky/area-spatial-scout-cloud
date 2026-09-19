@@ -323,12 +323,12 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
     candidate_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
 
     # 純粋な標準ソケット通信（urllib.request）によるGemini REST API直接呼び出し（厳格な2.0秒タイムアウト）
-    # ※ google-genai SDK や gRPC によるC言語レベルのGILロック・フリーズを100%完全根絶
+    # ※ 1回の試行で2.0秒を超えた場合は即座に自律ナレッジエンジンで完遂
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 0.2, "maxOutputTokens": 4000}
     }
-    for model in candidate_models:
+    for model in ["gemini-2.5-flash"]:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key.strip()}"
         try:
             req = urllib.request.Request(
