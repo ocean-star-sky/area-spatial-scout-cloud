@@ -13,6 +13,7 @@ import uuid
 import shutil
 import tempfile
 import traceback
+import concurrent.futures
 from datetime import datetime
 from pathlib import Path
 from pydantic import BaseModel
@@ -22,6 +23,16 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Streamin
 from research_engine import run_autonomous_research
 from report_engine import generate_full_report_pack
 from drive_uploader import upload_report_directory
+
+def safe_upload_drive(job_dir: Path, target_folder_name: str, timeout: float = 4.0) -> str | None:
+    """Google Driveへのアップロードを最大4秒で安全に打ち切るフェイルセーフ関数"""
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(upload_report_directory, job_dir, target_folder_name)
+            return future.result(timeout=timeout)
+    except Exception as e:
+        print(f"[Notice] Google Drive への同期をスキップ (タイムアウトまたは制限): {e}")
+        return None
 
 app = FastAPI(title="Area Spatial Scout Cloud", version="2.1.0")
 
@@ -111,11 +122,7 @@ def background_scout_task(job_id: str, area: str, theme: str, count: int, job_di
         shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
 
         update_job_status(job_id, job_dir, "processing", 90, "成果物を保存中...", "ダウンロードリンクとGoogleドライブ保存を処理中")
-        drive_url = None
-        try:
-            drive_url = upload_report_directory(job_dir, target_folder_name=folder_name)
-        except Exception as drive_err:
-            print(f"[Notice] Google Drive への同期をスキップ: {drive_err}")
+        drive_url = safe_upload_drive(job_dir, target_folder_name=folder_name, timeout=4.0)
 
         cleanup_old_jobs()
 
@@ -192,12 +199,7 @@ def stream_scout_generator(area: str, theme: str, count: int, password: str = ""
         shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
 
         yield make_event("processing", 88, "成果物を保存中...", "ダウンロードリンクとGoogleドライブ保存を処理中")
-
-        drive_url = None
-        try:
-            drive_url = upload_report_directory(job_dir, target_folder_name=folder_name)
-        except Exception as drive_err:
-            print(f"[Notice] Google Drive への同期をスキップ: {drive_err}")
+        drive_url = safe_upload_drive(job_dir, target_folder_name=folder_name, timeout=4.0)
 
         cleanup_old_jobs()
 

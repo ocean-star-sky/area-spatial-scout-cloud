@@ -12,6 +12,7 @@ import re
 import json
 import shutil
 import urllib.request
+import concurrent.futures
 from datetime import datetime
 from pathlib import Path
 from PIL import Image
@@ -317,51 +318,39 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
     key_masked = (key[:6] + "..." + key[-4:]) if len(key) > 10 else f"短すぎる/不正 (長さ: {len(key)})"
     print(f"[Research Engine] 使用中の API キー: {key_masked}")
 
-    # 無料枠で最も安定・大容量な gemini-2.5-flash を最優先！
-    candidate_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.6-flash"]
+    # 無料枠で最も安定・大容量な gemini-2.5-flash / flash-lite
+    candidate_models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
 
-    # 1. Google GenAI 公式 SDK (google-genai) による試行
-    if GENAI_AVAILABLE:
-        try:
-            client = genai.Client(api_key=key.strip())
-            for model in candidate_models:
-                print(f"[Research Engine] モデル '{model}' で生成を試行中...")
-                try:
-                    config = types.GenerateContentConfig(
-                        temperature=0.2,
-                        max_output_tokens=6000
-                    )
-                    resp = client.models.generate_content(
-                        model=model,
-                        contents=prompt,
-                        config=config
-                    )
-                    if resp.text:
-                        text_resp = resp.text.strip()
-                        print(f"[Research Engine] google-genai SDK: モデル '{model}' でリサーチ成功！")
-                        break
-                except Exception as e:
-                    err_msg = f"SDK {model}: {e}"
-                    all_errors.append(err_msg)
-                    print(f"[Info] {err_msg}")
-                    if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                        print("[Info] 429レート制限検知。5秒待機して次のモデルへ移行します...")
-                        import time
-                        time.sleep(5)
-                if text_resp:
-                    break
-        except Exception as sdk_init_err:
-            all_errors.append(f"SDK Client初期化エラー: {sdk_init_err}")
-            print(f"[Warning] SDK Client初期化失敗: {sdk_init_err}")
+    def fetch_gemini():
+        # 1. Google GenAI 公式 SDK (google-genai) による試行
+        if GENAI_AVAILABLE:
+            try:
+                client = genai.Client(api_key=key.strip())
+                for model in candidate_models:
+                    try:
+                        config = types.GenerateContentConfig(
+                            temperature=0.2,
+                            max_output_tokens=5000
+                        )
+                        resp = client.models.generate_content(
+                            model=model,
+                            contents=prompt,
+                            config=config
+                        )
+                        if resp.text:
+                            print(f"[Research Engine] google-genai SDK: モデル '{model}' でリサーチ成功！")
+                            return resp.text.strip()
+                    except Exception as e:
+                        all_errors.append(f"SDK {model}: {e}")
+            except Exception as sdk_init_err:
+                all_errors.append(f"SDK Client初期化エラー: {sdk_init_err}")
 
-    # 2. REST API 直接呼び出しによるフォールバック
-    if not text_resp:
-        print("[Research Engine] REST API 直接呼び出しによるフォールバックを試行します...")
+        # 2. REST API 直接呼び出しによるフォールバック (タイムアウト3.5秒)
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 6000}
+            "generationConfig": {"temperature": 0.2, "maxOutputTokens": 5000}
         }
-        for model in candidate_models[:2]:
+        for model in candidate_models:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key.strip()}"
             try:
                 req = urllib.request.Request(
@@ -370,27 +359,30 @@ def run_autonomous_research(area: str, theme: str, count: int = 10, output_dir: 
                     headers={"Content-Type": "application/json"},
                     method="POST"
                 )
-                with urllib.request.urlopen(req, timeout=45) as res:
+                with urllib.request.urlopen(req, timeout=3.5) as res:
                     res_json = json.loads(res.read().decode("utf-8"))
                     candidates = res_json.get("candidates", [])
                     if candidates:
                         parts = candidates[0].get("content", {}).get("parts", [])
                         if parts:
-                            text_resp = "".join(p.get("text", "") for p in parts if "text" in p).strip()
-                            if text_resp:
+                            t = "".join(p.get("text", "") for p in parts if "text" in p).strip()
+                            if t:
                                 print(f"[Research Engine] REST API: モデル '{model}' でリサーチ成功！")
-                                break
-            except urllib.error.HTTPError as e:
-                err_text = e.read().decode("utf-8", errors="ignore")
-                err_msg = f"REST {model}: HTTP {e.code} ({err_text[:120]})"
-                all_errors.append(err_msg)
-                print(f"[Info] {err_msg}")
+                                return t
             except Exception as e:
-                err_msg = f"REST {model}: {e}"
-                all_errors.append(err_msg)
-                print(f"[Info] {err_msg}")
-            if text_resp:
-                break
+                all_errors.append(f"REST {model}: {e}")
+
+        return None
+
+    # 厳格な6秒タイムアウト制御でブロックを物理根絶
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(fetch_gemini)
+            text_resp = future.result(timeout=6.0)
+    except concurrent.futures.TimeoutError:
+        print("[Info] Gemini API通信が6秒を超えたため、即座に高速自律ナレッジエンジンに切り替えます。")
+    except Exception as exec_err:
+        print(f"[Info] Gemini API処理例外 ({exec_err})。高速自律ナレッジエンジンに切り替えます。")
 
     # 3. JSON抽出またはインテリジェント・フォールバック
     data = None
