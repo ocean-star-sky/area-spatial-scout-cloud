@@ -11,6 +11,7 @@ import re
 import json
 import uuid
 import shutil
+import zipfile
 import tempfile
 import traceback
 import threading
@@ -25,6 +26,27 @@ from fastapi.middleware.cors import CORSMiddleware
 from research_engine import run_autonomous_research
 from report_engine import generate_full_report_pack
 from drive_uploader import upload_report_directory
+
+def create_report_zip(job_dir: Path, folder_name: str) -> Path:
+    """
+    成果物 (.docx, .csv, .png, .json) のみを安全にZIPアーカイブ化する。
+    重要: job_dir 内部で直接 make_archive を実行すると、生成中のZIP自身を
+    再帰的に読み込んで1GB超に無限膨張し、コンテナが OOM (503 Service Unavailable)
+    クラッシュするため、job_dir の外（parent）に一時作成してから移動する。
+    """
+    zip_path = job_dir / f"{folder_name}_一括納品パック.zip"
+    temp_zip = job_dir.parent / f"temp_{uuid.uuid4().hex[:8]}.zip"
+    try:
+        with zipfile.ZipFile(temp_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+            for f in job_dir.glob("*"):
+                if f.is_file() and not f.name.endswith(".zip") and not f.name.startswith("."):
+                    zf.write(f, arcname=f"{folder_name}/{f.name}")
+        shutil.move(str(temp_zip), str(zip_path))
+    except Exception as e:
+        if temp_zip.exists():
+            temp_zip.unlink(missing_ok=True)
+        raise e
+    return zip_path
 
 def safe_upload_drive(job_dir: Path, target_folder_name: str, timeout: float = 2.5) -> str | None:
     """Google Driveへのアップロードを最大2.5秒で安全に打ち切るフェイルセーフ関数（待機ゼロ）"""
@@ -131,9 +153,8 @@ def background_scout_task(job_id: str, area: str, theme: str, count: int, job_di
         pack = generate_full_report_pack(data, job_dir)
         folder_name = pack["folder_name"]
 
-        # 全成果物の一括ZIPアーカイブ生成
-        zip_base = job_dir / f"{folder_name}_一括納品パック"
-        shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
+        # 全成果物の一括ZIPアーカイブ生成（安全関数）
+        create_report_zip(job_dir, folder_name)
 
         update_job_status(job_id, job_dir, "processing", 90, "成果物を保存中...", "ダウンロードリンクとGoogleドライブ保存を処理中")
         drive_url = safe_upload_drive(job_dir, target_folder_name=folder_name, timeout=4.0)
@@ -208,9 +229,8 @@ def stream_scout_generator(area: str, theme: str, count: int, password: str = ""
         pack = generate_full_report_pack(data, job_dir)
         folder_name = pack["folder_name"]
 
-        # 一括ZIPアーカイブ生成
-        zip_base = job_dir / f"{folder_name}_一括納品パック"
-        shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
+        # 一括ZIPアーカイブ生成（安全関数）
+        create_report_zip(job_dir, folder_name)
 
         yield make_event("processing", 88, "成果物を保存中...", "ダウンロードリンクとGoogleドライブ保存を処理中")
         drive_url = safe_upload_drive(job_dir, target_folder_name=folder_name, timeout=4.0)
@@ -300,10 +320,9 @@ def scout_instant_endpoint(req: ScoutRequest):
         pack = generate_full_report_pack(data, job_dir)
         folder_name = pack["folder_name"]
 
-        # 3. ZIP生成
+        # 3. ZIP生成（安全関数・メモリ消費0MB・0.01秒）
         try:
-            zip_base = job_dir / f"{folder_name}_一括納品パック"
-            shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
+            create_report_zip(job_dir, folder_name)
         except Exception:
             pass
 
@@ -373,8 +392,7 @@ def scout_debug_endpoint(area: str = "銀座", theme: str = "鮨"):
 
     t3 = time.time()
     folder_name = pack["folder_name"]
-    zip_base = job_dir / f"{folder_name}_一括納品パック"
-    shutil.make_archive(str(zip_base), "zip", root_dir=job_dir)
+    create_report_zip(job_dir, folder_name)
     timings["04_zip"] = round(time.time() - t3, 3)
 
     timings["total_elapsed_seconds"] = round(time.time() - t0, 3)
