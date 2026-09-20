@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-from __future__ import annotations
 """
 report_engine.py
 Linuxコンテナ（Cloud Run）およびmacOSの両方に対応した、
 エグゼクティブ向けエリア・空間調査報告書 (PC版Word / スマホ専用Word / 重なりゼロ地図 / CSV台帳)
 の完全自動生成エンジン。
 """
+
+from __future__ import annotations
 
 import os
 import re
@@ -16,7 +16,6 @@ import math
 import sys
 import csv
 import json
-import shutil
 import unicodedata
 import urllib.parse
 import urllib.request
@@ -29,9 +28,9 @@ import docx
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from docx.enum.table import WD_TABLE_ALIGNMENT, WD_ALIGN_VERTICAL
-from docx.oxml import OxmlElement, parse_xml
-from docx.oxml.ns import qn, nsdecls
+from docx.enum.table import WD_TABLE_ALIGNMENT
+from docx.oxml import parse_xml
+from docx.oxml.ns import nsdecls
 
 # フォント定義
 FONT_JP = "游ゴシック"
@@ -55,6 +54,40 @@ def safe_nfc(val, default: str = "") -> str:
         return default
     text = unicodedata.normalize("NFC", str(val))
     return "".join(ch for ch in text if ord(ch) >= 32 or ch in "\n\r\t")
+
+
+def as_int(val, default: int = 0) -> int:
+    """クチコミ件数などを安全に整数化する。
+
+    LLM は 350 だけでなく "350件" / "約350" / None も返すため、書式指定 (f"{n:,}") の
+    直前に必ずここを通す。通さないと ValueError: Cannot specify ',' with 's' で
+    レポート生成が丸ごと落ちる。
+    """
+    if isinstance(val, bool):
+        return default
+    if isinstance(val, int):
+        return val
+    if isinstance(val, float):
+        return int(val)
+    digits = re.sub(r"[^0-9]", "", str(val or ""))
+    return int(digits) if digits else default
+
+
+_UNSAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def safe_filename_component(val, default: str = "未指定", max_len: int = 60) -> str:
+    """ファイル名に埋め込める安全な断片へ正規化する。
+
+    area / theme は利用者入力と LLM 応答の両方から来るため、そのまま f-string で
+    ファイル名に入れると `../..` で出力ディレクトリの外にファイルを作れてしまう
+    (読み出し側だけ固めても、書き込み側が素通りでは意味がない)。
+    """
+    text = safe_nfc(val).strip()
+    text = _UNSAFE_FILENAME_RE.sub("_", text)
+    text = text.replace(os.sep, "_")
+    text = re.sub(r"\.{2,}", "_", text).strip(". 　")
+    return text[:max_len] or default
 
 
 def make_google_maps_url(name: str, address: str) -> str:
@@ -191,72 +224,6 @@ def add_callout_box(doc, text: str, title: str = None, border_color_hex=COLOR_PR
     p_after.paragraph_format.space_after = Pt(1)
 
 
-# 日本全国主要ビジネス・商業エリア代表座標マスター (外部API通信0秒化)
-AREA_COORDINATES = {
-    "銀座": (35.6719, 139.7648),
-    "新橋": (35.6663, 139.7583),
-    "汐留": (35.6636, 139.7600),
-    "有楽町": (35.6750, 139.7630),
-    "日比谷": (35.6740, 139.7595),
-    "築地": (35.6655, 139.7707),
-    "渋谷": (35.6580, 139.7016),
-    "原宿": (35.6702, 139.7027),
-    "表参道": (35.6652, 139.7123),
-    "青山": (35.6652, 139.7180),
-    "新宿": (35.6909, 139.7003),
-    "西新宿": (35.6912, 139.6920),
-    "歌舞伎町": (35.6948, 139.7029),
-    "有明": (35.6318, 139.7942),
-    "豊洲": (35.6548, 139.7963),
-    "お台場": (35.6298, 139.7753),
-    "台場": (35.6298, 139.7753),
-    "東京": (35.6812, 139.7671),
-    "丸の内": (35.6815, 139.7640),
-    "大手町": (35.6865, 139.7645),
-    "日本橋": (35.6840, 139.7745),
-    "八重洲": (35.6800, 139.7710),
-    "六本木": (35.6628, 139.7314),
-    "赤坂": (35.6720, 139.7360),
-    "麻布": (35.6547, 139.7371),
-    "麻布十番": (35.6547, 139.7371),
-    "虎ノ門": (35.6690, 139.7490),
-    "恵比寿": (35.6467, 139.7101),
-    "目黒": (35.6339, 139.7158),
-    "代官山": (35.6490, 139.7035),
-    "中目黒": (35.6443, 139.6987),
-    "品川": (35.6284, 139.7387),
-    "五反田": (35.6264, 139.7234),
-    "大崎": (35.6197, 139.7282),
-    "秋葉原": (35.6983, 139.7730),
-    "神田": (35.6918, 139.7709),
-    "上野": (35.7141, 139.7741),
-    "浅草": (35.7126, 139.7966),
-    "池袋": (35.7295, 139.7109),
-    "中野": (35.7058, 139.6658),
-    "吉祥寺": (35.7031, 139.5798),
-    "立川": (35.6980, 139.4137),
-    "町田": (35.5420, 139.4460),
-    "横浜": (35.4658, 139.6227),
-    "みなとみらい": (35.4560, 139.6320),
-    "川崎": (35.5312, 139.6969),
-    "大宮": (35.9063, 139.6240),
-    "幕張": (35.6480, 140.0416),
-    "千葉": (35.6074, 140.1065),
-    "名古屋": (35.1709, 136.8815),
-    "栄": (35.1681, 136.9066),
-    "大阪": (34.7024, 135.4959),
-    "梅田": (34.7024, 135.4959),
-    "難波": (34.6669, 135.5003),
-    "心斎橋": (34.6751, 135.5005),
-    "京都": (34.9858, 135.7588),
-    "神戸": (34.6946, 135.1955),
-    "福岡": (33.5902, 130.4017),
-    "博多": (33.5902, 130.4207),
-    "天神": (33.5916, 130.3989),
-    "札幌": (43.0686, 141.3508)
-}
-
-
 def geocode_address(address: str) -> tuple[float, float] | None:
     """国土地理院APIを用いて住所から緯度経度を取得 (タイムアウト1秒・非同期/フェイルセーフ)"""
     if not address:
@@ -283,57 +250,38 @@ def deg2num(lat_deg, lon_deg, zoom):
 
 
 def generate_spots_map_image(spots: list[dict], output_path: Path, area: str = "エリア", theme: str = "テーマ") -> Path | None:
-    """全スポットを国土地理院タイル上にプロットした高精細俯瞰図を自動生成（スマート衝突回避＆2秒確約並列取得）"""
-    resolved_spots = []
-    
-    # 1. エリア代表座標の高速マッチング (通信0秒)
-    base_coord = None
-    for k, v in AREA_COORDINATES.items():
-        if k in area:
-            base_coord = v
-            break
-    if not base_coord:
-        base_coord = (35.6812, 139.7671)  # デフォルト（東京）
+    """住所を実際にジオコーディングできたスポットだけを国土地理院タイル上にプロットする。
 
-    # 2. 各スポットの座標解決（国土地理院API → マスター座標散布のカスケード）
+    重要: 解決できなかったスポットに「それらしい座標」を与えて地図に載せてはいけない。
+    実在の店名が、実在しない位置に、公的地図の出典表記付きで描かれることになる。
+    解決できたものが 1 件も無ければ地図自体を作らない (None を返す)。
+    """
+    resolved_spots = []
+
     for idx, s in enumerate(spots):
         lat = s.get("lat")
         lon = s.get("lon")
-        
-        # 既存座標がない場合、住所 → エリア辞書 → デフォルト の順で座標を付与
+
         if lat is None or lon is None:
             addr = s.get("address", "")
-            
-            # 第1候補: 国土地理院APIで正確な住所ジオコーディング（実在住所なら精度◎）
             geo = geocode_address(addr) if addr else None
-            if geo:
-                lat, lon = geo
-                # 同一住所の微小散布（ピン重なり防止）
-                angle = (idx * 137.5) * (math.pi / 180.0)
-                lat += 0.0003 * math.sin(angle)
-                lon += 0.0004 * math.cos(angle)
-            else:
-                # 第2候補: エリア辞書マッチ
-                spot_base = None
-                for k, v in AREA_COORDINATES.items():
-                    if k in addr:
-                        spot_base = v
-                        break
-                if not spot_base:
-                    spot_base = base_coord
-                
-                # 周辺への自然な幾何学的散布（同心・多角形オフセット: 約300m〜2km）
-                angle = (idx * 137.5) * (math.pi / 180.0)  # 黄金比アングル
-                # radius grows with idx to ensure distinct pins (0.003° ≈ 300 m)
-                radius = 0.003 + idx * 0.0015
-                lat = spot_base[0] + radius * math.sin(angle)
-                lon = spot_base[1] + (radius * 1.25) * math.cos(angle)
+            if not geo:
+                s["geocoded"] = False
+                print(f"[Map] 住所を解決できないため地図から除外: {s.get('name', '?')} ({addr or '住所なし'})")
+                continue
+            lat, lon = geo
+            # 同一住所に複数店が入る場合のピン重なりだけを避ける微小オフセット (約30m)
+            angle = (idx * 137.5) * (math.pi / 180.0)
+            lat += 0.0003 * math.sin(angle)
+            lon += 0.0004 * math.cos(angle)
             s["lat"], s["lon"] = lat, lon
-            
-        name = safe_nfc(s.get("name", f"スポット {idx+1}"))
+
+        s["geocoded"] = True
+        name = safe_nfc(s.get("name", f"スポット {idx + 1}"))
         resolved_spots.append((idx + 1, name, float(lat), float(lon)))
 
     if not resolved_spots:
+        print("[Map] 座標を確認できたスポットが無いため地図を生成しません")
         return None
 
     lats = [s[2] for s in resolved_spots]
@@ -586,6 +534,36 @@ def generate_spots_map_image(spots: list[dict], output_path: Path, area: str = "
     return output_path
 
 
+def add_sources_section(doc, meta: dict, heading_pt: float = 14.0):
+    """Google 検索グラウンディングで実際に参照した出典を巻末に列挙する"""
+    sources = meta.get("sources") or []
+    queries = meta.get("search_queries") or []
+    if not sources and not queries:
+        return
+
+    doc.add_page_break()
+    h = doc.add_paragraph()
+    h.paragraph_format.space_before = Pt(6)
+    h.paragraph_format.space_after = Pt(3)
+    r_h = h.add_run("調査の出典")
+    format_run(r_h, font_name=FONT_JP_TITLE, size_pt=heading_pt, bold=True, color_hex=COLOR_PRIMARY_HEX)
+
+    if queries:
+        p_q = doc.add_paragraph()
+        p_q.paragraph_format.space_after = Pt(3)
+        r_q = p_q.add_run("検索クエリ: " + " / ".join(safe_nfc(q) for q in queries[:8]))
+        format_run(r_q, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MUTED_HEX)
+
+    for i, src in enumerate(sources[:30], start=1):
+        p = doc.add_paragraph()
+        p.paragraph_format.space_before = Pt(1)
+        p.paragraph_format.space_after = Pt(1)
+        r_n = p.add_run(f"[{i}] ")
+        format_run(r_n, font_name=FONT_JP, size_pt=12.0, bold=True, color_hex=COLOR_ACCENT_HEX)
+        title = safe_nfc(src.get("title") or src.get("uri", ""))
+        add_hyperlink(p, src.get("uri", ""), title, size_pt=12.0)
+
+
 def create_csv_report(data: dict, output_path: Path):
     """CSV台帳（BOM付きUTF-8）"""
     spots = data.get("spots", [])
@@ -608,7 +586,7 @@ def create_csv_report(data: dict, output_path: Path):
                 safe_nfc(s.get("name")),
                 safe_nfc(s.get("category")),
                 safe_nfc(s.get("rating")),
-                s.get("reviews_count", 0),
+                as_int(s.get("reviews_count")),
                 safe_nfc(s.get("address")),
                 safe_nfc(s.get("url")),
                 safe_nfc(topics),
@@ -663,6 +641,16 @@ def create_docx_report(data: dict, output_path: Path, map_image_path: Path = Non
         add_callout_box(doc, "\n".join([safe_nfc(f) for f in findings_list]), title="【主要ファインディングス】")
 
     has_map = bool(map_image_path and os.path.exists(map_image_path))
+    if not has_map:
+        # 地図を出せない理由を黙って伏せない (章が消えるだけだと理由が伝わらない)
+        unmapped = [s for s in spots if not s.get("geocoded")]
+        if unmapped:
+            add_callout_box(
+                doc,
+                f"掲載 {len(spots)} 件のうち {len(unmapped)} 件は住所を確認できなかったため、"
+                "位置関係マップは作成していません（推定位置で地図に描くことはしません）。",
+                title="【広域俯瞰図について】",
+            )
     if has_map:
         doc.add_page_break()
         h_map = doc.add_paragraph()
@@ -696,7 +684,7 @@ def create_docx_report(data: dict, output_path: Path, map_image_path: Path = Non
         name = safe_nfc(s.get("name", f"スポット {idx+1}"))
         category = safe_nfc(s.get("category", "施設"))
         rating = safe_nfc(s.get("rating", "-"))
-        reviews_count = s.get("reviews_count", 0)
+        reviews_count = as_int(s.get("reviews_count"))
         address = safe_nfc(s.get("address", "-"))
         url = safe_nfc(s.get("url", ""))
         gmaps_url = make_google_maps_url(name, address)
@@ -720,37 +708,41 @@ def create_docx_report(data: dict, output_path: Path, map_image_path: Path = Non
         r_cat = p_meta.add_run(f"【{category}】  ★ {rating} ({reviews_count:,}件のクチコミ)")
         format_run(r_cat, font_name=FONT_JP, size_pt=12.0, bold=True, color_hex=COLOR_ACCENT_GOLD)
 
-        # 写真2枚テーブル
-        tbl_photo = doc.add_table(rows=2, cols=2)
-        tbl_photo.alignment = WD_TABLE_ALIGNMENT.CENTER
-        tbl_photo.autofit = False
-        tbl_photo.columns[0].width = Inches(3.6)
-        tbl_photo.columns[1].width = Inches(3.6)
-        set_modern_horizontal_borders(tbl_photo, border_hex="E2E8F0")
+        # 写真テーブル（実在画像を取得できたスポットのみ。無い場合は枠ごと出さない）
+        usable_photos = [p for p in photos if p.get("path") and os.path.exists(p.get("path"))]
+        if usable_photos:
+            tbl_photo = doc.add_table(rows=2, cols=len(usable_photos))
+            tbl_photo.alignment = WD_TABLE_ALIGNMENT.CENTER
+            tbl_photo.autofit = False
+            for col in tbl_photo.columns:
+                col.width = Inches(3.6)
+            set_modern_horizontal_borders(tbl_photo, border_hex="E2E8F0")
 
-        for col_idx in range(2):
-            cell_img = tbl_photo.cell(0, col_idx)
-            cell_cap = tbl_photo.cell(1, col_idx)
-            set_cell_margins(cell_img, top_pt=2.0, bottom_pt=2.0, left_pt=3.0, right_pt=3.0)
-            set_cell_margins(cell_cap, top_pt=1.0, bottom_pt=2.0, left_pt=3.0, right_pt=3.0)
-            
-            p_img_c = cell_img.paragraphs[0]
-            p_img_c.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            p_cap_c = cell_cap.paragraphs[0]
-            p_cap_c.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            
-            if col_idx < len(photos):
-                ph = photos[col_idx]
-                ph_path = ph.get("path")
-                caption = safe_nfc(ph.get("caption", f"写真 {col_idx+1}"))
-                if ph_path and os.path.exists(ph_path):
-                    r_p = p_img_c.add_run()
-                    r_p.add_picture(str(ph_path), width=Inches(3.5))
-                else:
-                    r_none = p_img_c.add_run("[写真準備中]")
-                    format_run(r_none, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MUTED_HEX)
-                r_cap = p_cap_c.add_run(f"▲ {caption}")
+            for col_idx, ph in enumerate(usable_photos):
+                cell_img = tbl_photo.cell(0, col_idx)
+                cell_cap = tbl_photo.cell(1, col_idx)
+                set_cell_margins(cell_img, top_pt=2.0, bottom_pt=2.0, left_pt=3.0, right_pt=3.0)
+                set_cell_margins(cell_cap, top_pt=1.0, bottom_pt=2.0, left_pt=3.0, right_pt=3.0)
+
+                p_img_c = cell_img.paragraphs[0]
+                p_img_c.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                p_cap_c = cell_cap.paragraphs[0]
+                p_cap_c.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+                r_p = p_img_c.add_run()
+                r_p.add_picture(str(ph["path"]), width=Inches(3.5))
+                r_cap = p_cap_c.add_run(f"▲ {safe_nfc(ph.get('caption', ''))}")
                 format_run(r_cap, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MUTED_HEX)
+
+        # 特徴キーワード
+        if key_topics:
+            p_topics = doc.add_paragraph()
+            p_topics.paragraph_format.space_before = Pt(2)
+            p_topics.paragraph_format.space_after = Pt(2)
+            r_tl = p_topics.add_run("特徴: ")
+            format_run(r_tl, font_name=FONT_JP, size_pt=12.0, bold=True, color_hex=COLOR_PRIMARY_HEX)
+            r_tv = p_topics.add_run(" / ".join(key_topics))
+            format_run(r_tv, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MAIN_HEX)
 
         # 諸元・料金・混雑度テーブル
         tbl_info = doc.add_table(rows=4, cols=2)
@@ -784,34 +776,35 @@ def create_docx_report(data: dict, output_path: Path, map_image_path: Path = Non
                 r_v = p_v.add_run(val)
                 format_run(r_v, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MAIN_HEX)
 
-        # 口コミ8件グリッド
-        p_rev_hdr = doc.add_paragraph()
-        p_rev_hdr.paragraph_format.space_before = Pt(3)
-        p_rev_hdr.paragraph_format.space_after = Pt(1)
-        r_rh = p_rev_hdr.add_run("▼ 利用者のリアルなクチコミ・評判（厳選8件）")
-        format_run(r_rh, font_name=FONT_JP_TITLE, size_pt=13.0, bold=True, color_hex=COLOR_PRIMARY_HEX)
+        # クチコミ（調査で確認できた件数のみ。見出しの件数も実数に合わせる）
+        if reviews:
+            p_rev_hdr = doc.add_paragraph()
+            p_rev_hdr.paragraph_format.space_before = Pt(3)
+            p_rev_hdr.paragraph_format.space_after = Pt(1)
+            r_rh = p_rev_hdr.add_run(f"▼ 調査で確認できた利用者のクチコミ（{len(reviews)}件）")
+            format_run(r_rh, font_name=FONT_JP_TITLE, size_pt=13.0, bold=True, color_hex=COLOR_PRIMARY_HEX)
 
-        tbl_rev = doc.add_table(rows=4, cols=2)
-        tbl_rev.alignment = WD_TABLE_ALIGNMENT.CENTER
-        tbl_rev.autofit = False
-        tbl_rev.columns[0].width = Inches(3.6)
-        tbl_rev.columns[1].width = Inches(3.6)
-        set_modern_horizontal_borders(tbl_rev, border_hex="CBD5E1")
+            n_rows = (len(reviews) + 1) // 2
+            tbl_rev = doc.add_table(rows=n_rows, cols=2)
+            tbl_rev.alignment = WD_TABLE_ALIGNMENT.CENTER
+            tbl_rev.autofit = False
+            tbl_rev.columns[0].width = Inches(3.6)
+            tbl_rev.columns[1].width = Inches(3.6)
+            set_modern_horizontal_borders(tbl_rev, border_hex="CBD5E1")
 
-        for r_i in range(4):
-            for c_i in range(2):
-                cell_idx = r_i * 2 + c_i
-                cell = tbl_rev.cell(r_i, c_i)
-                set_cell_margins(cell, top_pt=4.0, bottom_pt=4.0, left_pt=6.0, right_pt=6.0)
-                p_c = cell.paragraphs[0]
-                p_c.paragraph_format.line_spacing = 1.1
-                
-                if cell_idx < len(reviews):
-                    rev_text = safe_nfc(reviews[cell_idx])
-                    r_num_b = p_c.add_run(f"#{cell_idx+1} ")
-                    format_run(r_num_b, font_name=FONT_JP, size_pt=12.0, bold=True, color_hex=COLOR_ACCENT_HEX)
-                    r_rev = p_c.add_run(f"「{rev_text}」")
-                    format_run(r_rev, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MAIN_HEX)
+            for r_i in range(n_rows):
+                for c_i in range(2):
+                    cell_idx = r_i * 2 + c_i
+                    cell = tbl_rev.cell(r_i, c_i)
+                    set_cell_margins(cell, top_pt=4.0, bottom_pt=4.0, left_pt=6.0, right_pt=6.0)
+                    p_c = cell.paragraphs[0]
+                    p_c.paragraph_format.line_spacing = 1.1
+
+                    if cell_idx < len(reviews):
+                        r_num_b = p_c.add_run(f"#{cell_idx + 1} ")
+                        format_run(r_num_b, font_name=FONT_JP, size_pt=12.0, bold=True, color_hex=COLOR_ACCENT_HEX)
+                        r_rev = p_c.add_run(f"「{safe_nfc(reviews[cell_idx])}」")
+                        format_run(r_rev, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MAIN_HEX)
 
     # 第3部: 戦略的示唆
     doc.add_page_break()
@@ -822,6 +815,8 @@ def create_docx_report(data: dict, output_path: Path, map_image_path: Path = Non
     r_h3 = h3.add_run(f"{advice_sec_no}. 空間・出店・利用戦略への戦略的示唆")
     format_run(r_h3, font_name=FONT_JP_TITLE, size_pt=16.0, bold=True, color_hex=COLOR_PRIMARY_HEX)
     add_callout_box(doc, safe_nfc(meta.get("strategic_advice", "")), title="【空間スカウティングからの戦略的提言】")
+
+    add_sources_section(doc, meta)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
@@ -869,6 +864,16 @@ def create_docx_report_mobile(data: dict, output_path: Path, map_image_path: Pat
         add_callout_box(doc, "\n".join([safe_nfc(f) for f in findings_list]), title="【キー・ファインディングス】")
 
     has_map = bool(map_image_path and os.path.exists(map_image_path))
+    if not has_map:
+        # 地図を出せない理由を黙って伏せない (章が消えるだけだと理由が伝わらない)
+        unmapped = [s for s in spots if not s.get("geocoded")]
+        if unmapped:
+            add_callout_box(
+                doc,
+                f"掲載 {len(spots)} 件のうち {len(unmapped)} 件は住所を確認できなかったため、"
+                "位置関係マップは作成していません（推定位置で地図に描くことはしません）。",
+                title="【広域俯瞰図について】",
+            )
     if has_map:
         doc.add_page_break()
         h_map = doc.add_paragraph()
@@ -901,7 +906,7 @@ def create_docx_report_mobile(data: dict, output_path: Path, map_image_path: Pat
         name = safe_nfc(s.get("name", f"スポット {idx+1}"))
         category = safe_nfc(s.get("category", "施設"))
         rating = safe_nfc(s.get("rating", "-"))
-        reviews_count = s.get("reviews_count", 0)
+        reviews_count = as_int(s.get("reviews_count"))
         address = safe_nfc(s.get("address", "-"))
         url = safe_nfc(s.get("url", ""))
         gmaps_url = make_google_maps_url(name, address)
@@ -949,12 +954,17 @@ def create_docx_report_mobile(data: dict, output_path: Path, map_image_path: Pat
             f"■ 料金体系: {pricing}",
             f"■ 混雑傾向: ピーク {peak_time} / 閑散 {quiet_time}"
         ]
+        if key_topics:
+            card_lines.append(f"■ 特徴: {' / '.join(key_topics)}")
         add_callout_box(doc, "\n".join(card_lines), title="【基本諸元・料金・混雑】")
+
+        if not reviews:
+            continue
 
         p_rev_h = doc.add_paragraph()
         p_rev_h.paragraph_format.space_before = Pt(3)
         p_rev_h.paragraph_format.space_after = Pt(2)
-        r_rh = p_rev_h.add_run("▼ 利用者のリアルな声（厳選8件）")
+        r_rh = p_rev_h.add_run(f"▼ 調査で確認できた利用者の声（{len(reviews)}件）")
         format_run(r_rh, font_name=FONT_JP_TITLE, size_pt=13.0, bold=True, color_hex=COLOR_PRIMARY_HEX)
 
         for r_idx, rev in enumerate(reviews[:8]):
@@ -976,6 +986,8 @@ def create_docx_report_mobile(data: dict, output_path: Path, map_image_path: Pat
     format_run(r_h3, font_name=FONT_JP_TITLE, size_pt=15.0, bold=True, color_hex=COLOR_PRIMARY_HEX)
     add_callout_box(doc, safe_nfc(meta.get("strategic_advice", "")), title="【空間スカウティングからの戦略的提言】")
 
+    add_sources_section(doc, meta)
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
 
@@ -990,22 +1002,27 @@ def generate_full_report_pack(data: dict, output_dir: Path) -> dict:
     spots = data.get("spots", [])
     spots_count = len(spots)
 
+    # ファイル名に使う断片は必ずサニタイズする (本文表示には元の値を使う)
+    area_fn = safe_filename_component(area, default="エリア")
+    theme_fn = safe_filename_component(theme, default="テーマ")
     date_str = re.sub(r"[^0-9]", "", str(scouted_at))[:8] if scouted_at else datetime.now().strftime("%Y%m%d")
     count_str = f"_Top{spots_count}" if spots_count > 0 else ""
 
     # 1. 地図画像
-    map_path = output_dir / f"{area}_{theme}_plot_map.png"
+    map_path = output_dir / f"{area_fn}_{theme_fn}_plot_map.png"
     try:
-        generate_spots_map_image(spots, map_path, area=area, theme=theme)
+        # 戻り値を必ず受ける。座標を確認できたスポットが無い場合は None が返るため、
+        # ここで無視すると「存在しないファイルのパス」を成果物として返してしまう。
+        map_path = generate_spots_map_image(spots, map_path, area=area, theme=theme)
     except Exception as e:
         print(f"[Warning] 地図生成スキップ: {e}", file=sys.stderr)
         map_path = None
 
     # 2. ファイル名
-    docx_name = f"【{area}】{theme}{count_str}比較調査レポート_{date_str}.docx"
-    mobile_docx_name = f"【{area}】{theme}{count_str}比較調査レポート_スマホ閲覧用_{date_str}.docx"
-    csv_name = f"【{area}】{theme}{count_str}スポット台帳_{date_str}.csv"
-    folder_name = f"{date_str}_【{area}】{theme}{count_str}比較調査レポート"
+    docx_name = f"【{area_fn}】{theme_fn}{count_str}比較調査レポート_{date_str}.docx"
+    mobile_docx_name = f"【{area_fn}】{theme_fn}{count_str}比較調査レポート_スマホ閲覧用_{date_str}.docx"
+    csv_name = f"【{area_fn}】{theme_fn}{count_str}スポット台帳_{date_str}.csv"
+    folder_name = f"{date_str}_【{area_fn}】{theme_fn}{count_str}比較調査レポート"
 
     docx_path = output_dir / docx_name
     mobile_docx_path = output_dir / mobile_docx_name
@@ -1017,12 +1034,6 @@ def generate_full_report_pack(data: dict, output_dir: Path) -> dict:
     create_docx_report(data, docx_path, map_image_path=map_path)
     # 5. Mobile Word
     create_docx_report_mobile(data, mobile_docx_path, map_image_path=map_path)
-
-    # 互換用
-    compat_docx = output_dir / "area_scout_report.docx"
-    compat_csv = output_dir / "spots_ledger.csv"
-    shutil.copy2(docx_path, compat_docx)
-    shutil.copy2(csv_path, compat_csv)
 
     return {
         "folder_name": folder_name,

@@ -38,7 +38,10 @@
         <span class="mr-1.5">📱</span> スマホから一撃生成＆Google ドライブ直結
       </h2>
       <p class="text-xs text-slate-500 leading-relaxed">
-        エリアとテーマを入力するだけで、Geminiが食べログ・Googleマップを自律走査。国土地理院プロット地図・PC用A4カルテ・スマホ用Word（横スクロールゼロ）をGoogleドライブへ自動保存します。
+        エリアとテーマを入力すると、Gemini が Google 検索で実在の施設情報を確認し、国土地理院プロット地図・PC用A4カルテ・スマホ用Word（横スクロールゼロ）・CSV台帳を生成します。参照した出典はレポート巻末に記載されます。
+      </p>
+      <p class="text-[11px] text-slate-400 mt-2 leading-relaxed">
+        ※ 検索で確認できなかった項目は空欄になります。埋め合わせの推測値は記載しません。
       </p>
     </div>
 
@@ -68,8 +71,8 @@
         </div>
 
         <div>
-          <label class="block text-xs font-bold text-slate-700 mb-1">アクセスキー</label>
-          <input type="password" id="password" name="password" placeholder="合言葉"
+          <label class="block text-xs font-bold text-slate-700 mb-1">アクセスキー（必須）</label>
+          <input type="password" id="password" name="password" placeholder="合言葉" required
                  class="w-full text-base px-3 py-3 bg-white border border-slate-300 rounded-xl focus:outline-none shadow-sm">
         </div>
       </div>
@@ -111,7 +114,21 @@
         <div id="progressBar" class="bg-[#0F2C59] h-2.5 rounded-full transition-all duration-500" style="width: 25%"></div>
       </div>
       
-      <div class="text-[11px] text-slate-400">※処理には通常 1〜2分程度かかります。画面を閉じてもクラウド側で処理は継続します。</div>
+      <div class="text-[11px] text-slate-400">※Web検索を伴うため通常 30秒〜2分かかります。この画面を閉じると処理は中断されます。</div>
+    </div>
+
+    <!-- 失敗カード -->
+    <div id="errorCard" class="hidden bg-white rounded-2xl p-5 shadow-md border-2 border-rose-400 mt-6 space-y-3">
+      <div class="text-center text-3xl">⚠️</div>
+      <h3 class="text-base font-bold text-slate-800 text-center">調査を完了できませんでした</h3>
+      <p class="text-xs text-slate-600 leading-relaxed" id="errorMessage"></p>
+      <ul class="text-[11px] text-slate-400 list-disc pl-4 space-y-0.5" id="errorReasons"></ul>
+      <p class="text-[11px] text-slate-400">
+        推測で作った架空のレポートは生成しません。時間をおくか、エリア・テーマを変えてお試しください。
+      </p>
+      <div class="pt-1 text-center">
+        <button onclick="resetForm()" class="text-xs text-slate-500 underline">入力に戻る</button>
+      </div>
     </div>
 
     <!-- 完了カード -->
@@ -163,12 +180,15 @@
           <span class="text-xs text-slate-400">DL ➔</span>
         </a>
 
-        <!-- 5. Google ドライブ（同期成功時のみ表示） -->
+        <!-- 5. Google ドライブ（納品成功時のみ表示） -->
         <a id="driveLink" href="#" target="_blank" class="hidden block w-full btn-success text-white font-bold py-3 px-4 rounded-xl shadow flex items-center justify-center space-x-2 text-sm mt-2">
           <span>📂</span>
           <span>Google ドライブで開く</span>
         </a>
+        <p id="driveNote" class="hidden text-[11px] text-slate-400 leading-relaxed"></p>
       </div>
+
+      <p id="resultMeta" class="text-[11px] text-slate-400 leading-relaxed"></p>
 
       <div class="pt-2 border-t border-slate-200">
         <button onclick="resetForm()" class="text-xs text-slate-500 underline">別のエリア・テーマを調べる</button>
@@ -201,6 +221,7 @@
       form.classList.add('hidden');
       progressCard.classList.remove('hidden');
       resultCard.classList.add('hidden');
+      document.getElementById('errorCard').classList.add('hidden');
 
       let curProgress = 15;
       updateProgress(curProgress, "クラウドAIエンジン起動中...", "最新スポット情報を自律リサーチしています");
@@ -228,15 +249,19 @@
         clearInterval(animInterval);
 
         if (!response.ok) {
-          const errText = await response.text();
-          let msg = "生成に失敗しました";
+          let msg = `生成に失敗しました (HTTP ${response.status})`;
+          let reasons = [];
           try {
-            const errData = JSON.parse(errText);
-            msg = errData.detail || msg;
-          } catch(e) {
-            msg = errText;
-          }
-          throw new Error(msg);
+            const detail = (await response.json()).detail;
+            if (typeof detail === 'string') {
+              msg = detail;
+            } else if (detail && typeof detail === 'object') {
+              msg = detail.message || msg;
+              reasons = detail.reasons || [];
+            }
+          } catch (e) { /* 本文が JSON でない場合は既定メッセージのまま */ }
+          showError(msg, reasons);
+          return;
         }
 
         const data = await response.json();
@@ -247,25 +272,58 @@
           resultCard.classList.remove('hidden');
 
           document.getElementById('resultTitle').innerText = `【${area}】${theme} Top${data.spots_count || count} レポート完成！`;
-          document.getElementById('mapImg').src = data.map_url;
+          // 住所を確認できたスポットが無い場合は地図を作らないため、枠ごと隠す
+          const hasMap = data.mapped_count === undefined || data.mapped_count > 0;
+          document.getElementById('mapContainer').classList.toggle('hidden', !hasMap);
+          if (hasMap) document.getElementById('mapImg').src = data.map_url;
           document.getElementById('mobileDocxLink').href = data.mobile_docx_url;
           document.getElementById('pcDocxLink').href = data.pc_docx_url;
           document.getElementById('zipLink').href = data.zip_url;
           document.getElementById('csvLink').href = data.csv_url;
 
+          const driveNote = document.getElementById('driveNote');
           if (data.drive_url) {
             const driveBtn = document.getElementById('driveLink');
             driveBtn.href = data.drive_url;
             driveBtn.classList.remove('hidden');
+            driveNote.classList.add('hidden');
+          } else if (data.drive_status && data.drive_status !== 'uploaded') {
+            driveNote.innerText = 'Google ドライブ納品: ' + data.drive_status;
+            driveNote.classList.remove('hidden');
           }
+
+          const meta = [];
+          if (data.spots_count < data.requested_count) {
+            meta.push(`検索で確認できたのは ${data.spots_count} 件でした（要求 ${data.requested_count} 件）`);
+          }
+          if (typeof data.mapped_count === 'number' && data.mapped_count < data.spots_count) {
+            meta.push(`住所を確認できたのは ${data.mapped_count}/${data.spots_count} 件（地図はこの分のみ）`);
+          }
+          if (data.sources_count) meta.push(`参照した出典 ${data.sources_count} 件をレポート巻末に記載`);
+          if (data.elapsed_seconds) meta.push(`所要 ${data.elapsed_seconds} 秒`);
+          document.getElementById('resultMeta').innerText = meta.join(' / ');
         }, 300);
 
       } catch (err) {
         clearInterval(animInterval);
-        alert("エラー: " + err.message);
-        resetForm();
+        showError(err.message || String(err), []);
       }
     });
+
+    function showError(message, reasons) {
+      progressCard.classList.add('hidden');
+      resultCard.classList.add('hidden');
+      form.classList.add('hidden');
+      document.getElementById('errorMessage').innerText = message;
+      const ul = document.getElementById('errorReasons');
+      ul.innerHTML = '';
+      (reasons || []).forEach((r) => {
+        const li = document.createElement('li');
+        li.innerText = r;
+        ul.appendChild(li);
+      });
+      document.getElementById('errorCard').classList.remove('hidden');
+    }
 
     function updateProgress(percent, title, detail) {
       document.getElementById('progressBar').style.width = percent + '%';
@@ -277,6 +335,7 @@
       form.classList.remove('hidden');
       resultCard.classList.add('hidden');
       progressCard.classList.add('hidden');
+      document.getElementById('errorCard').classList.add('hidden');
     }
   </script>
 </body>
