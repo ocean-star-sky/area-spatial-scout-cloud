@@ -213,6 +213,20 @@ MUTATIONS = [
         "tests/test_address_backfill.py::test_backfill_runs_before_area_verification",
     ),
     (
+        "アップロード0件でも空フォルダを残す (旧版の汚染が復活)",
+        "drive_uploader.py",
+        "        _delete_folder_quietly(service, folder_id)\n        raise DriveUploadError",
+        "        raise DriveUploadError",
+        "tests/test_drive_uploader.py::test_empty_directory_does_not_leave_a_folder",
+    ),
+    (
+        "OAuth より サービスアカウントを優先する",
+        "drive_uploader.py",
+        'return "oauth_user" if os.environ.get("GDRIVE_OAUTH_JSON", "").strip() else "service_account"',
+        'return "service_account"',
+        "tests/test_drive_uploader.py::test_oauth_credentials_are_preferred_over_service_account",
+    ),
+    (
         "自己展開デプロイスクリプトを復活",
         "__NEW_FILE__:update_and_deploy.sh",
         "",

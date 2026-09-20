@@ -14,6 +14,7 @@ SA_NAME="${SA_NAME:-area-spatial-scout}"
 GEMINI_SECRET="${GEMINI_SECRET:-gemini-api-key}"
 PASSWORD_SECRET="${PASSWORD_SECRET:-scout-password}"
 TOKEN_SECRET="${TOKEN_SECRET:-scout-token-secret}"
+OAUTH_SECRET="${OAUTH_SECRET:-gdrive-oauth}"
 
 echo "=========================================================="
 echo "🚀 Area Spatial Scout: Cloud Run へのデプロイを開始します"
@@ -93,6 +94,19 @@ if [ -z "${SCOUT_TOKEN_SECRET:-}" ] && ! gcloud secrets describe "$TOKEN_SECRET"
 fi
 ensure_secret "$TOKEN_SECRET" "${SCOUT_TOKEN_SECRET:-}"
 
+# ---------------------------------------------------------------- Drive の OAuth 資格情報 (任意)
+# サービスアカウントはマイドライブに保存容量を持たないため、マイドライブへ納品するには
+# ユーザーの OAuth リフレッシュトークンが要る。GDRIVE_OAUTH_JSON があれば登録する。
+DRIVE_OAUTH_ARG=""
+if [ -n "${GDRIVE_OAUTH_JSON:-}" ]; then
+    ensure_secret "$OAUTH_SECRET" "$GDRIVE_OAUTH_JSON"
+    DRIVE_OAUTH_ARG=",GDRIVE_OAUTH_JSON=${OAUTH_SECRET}:latest"
+elif gcloud secrets describe "$OAUTH_SECRET" --project="$PROJECT_ID" &>/dev/null; then
+    ensure_secret "$OAUTH_SECRET" ""
+    DRIVE_OAUTH_ARG=",GDRIVE_OAUTH_JSON=${OAUTH_SECRET}:latest"
+    echo "🔐 既存の $OAUTH_SECRET を使用します"
+fi
+
 # ---------------------------------------------------------------- 納品先
 DRIVE_PARENT_FOLDER_ID="${DRIVE_PARENT_FOLDER_ID:-}"
 if [ -z "$DRIVE_PARENT_FOLDER_ID" ]; then
@@ -119,7 +133,7 @@ gcloud run deploy "$SERVICE_NAME" \
     --min-instances 0 \
     --max-instances 10 \
     --concurrency 20 \
-    --set-secrets "GEMINI_API_KEY=${GEMINI_SECRET}:latest,SCOUT_PASSWORD=${PASSWORD_SECRET}:latest,SCOUT_TOKEN_SECRET=${TOKEN_SECRET}:latest" \
+    --set-secrets "GEMINI_API_KEY=${GEMINI_SECRET}:latest,SCOUT_PASSWORD=${PASSWORD_SECRET}:latest,SCOUT_TOKEN_SECRET=${TOKEN_SECRET}:latest${DRIVE_OAUTH_ARG}" \
     --set-env-vars "DRIVE_PARENT_FOLDER_ID=${DRIVE_PARENT_FOLDER_ID}" \
     --project "$PROJECT_ID"
 
@@ -132,9 +146,13 @@ echo "🌐 URL: $SERVICE_URL"
 echo "👤 サービスアカウント: $SA_EMAIL"
 echo "----------------------------------------------------------"
 echo "📂 Google ドライブ納品を使う場合（初回のみ）:"
-echo "   1. 納品先フォルダを【共有ドライブ】内に作る"
-echo "      （マイドライブ配下だとサービスアカウントは保存できません）"
-echo "   2. そのフォルダに $SA_EMAIL を『コンテンツ管理者』として追加"
-echo "   3. フォルダIDを指定して再実行:"
-echo "      DRIVE_PARENT_FOLDER_ID=<フォルダID> ./deploy.sh"
+echo "   ■ マイドライブへ納品する（共有ドライブを作れない場合はこちら）"
+echo "     OAuth ユーザー資格情報が必要です。サービスアカウントはマイドライブに"
+echo "     保存容量を持たず、空フォルダしか作れません。"
+echo "       GDRIVE_OAUTH_JSON='{\"client_id\":\"...\",\"client_secret\":\"...\",\"refresh_token\":\"...\"}' \\"
+echo "       DRIVE_PARENT_FOLDER_ID=<フォルダID> ./deploy.sh"
+echo "   ■ 共有ドライブへ納品する"
+echo "     1. 共有ドライブ内に納品先フォルダを作る"
+echo "     2. そのフォルダに $SA_EMAIL を『コンテンツ管理者』として追加"
+echo "     3. DRIVE_PARENT_FOLDER_ID=<フォルダID> ./deploy.sh"
 echo "=========================================================="
