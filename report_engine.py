@@ -322,9 +322,10 @@ def generate_spots_map_image(spots: list[dict], output_path: Path, area: str = "
                 if not spot_base:
                     spot_base = base_coord
                 
-                # 周辺への自然な幾何学的散布（同心・多角形オフセット: 約300m〜1km）
+                # 周辺への自然な幾何学的散布（同心・多角形オフセット: 約300m〜2km）
                 angle = (idx * 137.5) * (math.pi / 180.0)  # 黄金比アングル
-                radius = 0.003 + (idx % 4) * 0.002
+                # radius grows with idx to ensure distinct pins (0.003° ≈ 300 m)
+                radius = 0.003 + idx * 0.0015
                 lat = spot_base[0] + radius * math.sin(angle)
                 lon = spot_base[1] + (radius * 1.25) * math.cos(angle)
             s["lat"], s["lon"] = lat, lon
