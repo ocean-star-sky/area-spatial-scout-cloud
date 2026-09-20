@@ -295,27 +295,38 @@ def generate_spots_map_image(spots: list[dict], output_path: Path, area: str = "
     if not base_coord:
         base_coord = (35.6812, 139.7671)  # デフォルト（東京）
 
-    # 2. 各スポットの座標解決（マスター座標からの動的散布により0秒で確定）
+    # 2. 各スポットの座標解決（国土地理院API → マスター座標散布のカスケード）
     for idx, s in enumerate(spots):
         lat = s.get("lat")
         lon = s.get("lon")
         
-        # 既存座標がない場合、住所またはエリアから即座に座標を付与
+        # 既存座標がない場合、住所 → エリア辞書 → デフォルト の順で座標を付与
         if lat is None or lon is None:
             addr = s.get("address", "")
-            spot_base = None
-            for k, v in AREA_COORDINATES.items():
-                if k in addr:
-                    spot_base = v
-                    break
-            if not spot_base:
-                spot_base = base_coord
             
-            # 周辺への自然な幾何学的散布（同心・多角形オフセット: 約300m〜1km）
-            angle = (idx * 137.5) * (math.pi / 180.0)  # 黄金比アングル
-            radius = 0.003 + (idx % 4) * 0.002
-            lat = spot_base[0] + radius * math.sin(angle)
-            lon = spot_base[1] + (radius * 1.25) * math.cos(angle)
+            # 第1候補: 国土地理院APIで正確な住所ジオコーディング（実在住所なら精度◎）
+            geo = geocode_address(addr) if addr else None
+            if geo:
+                lat, lon = geo
+                # 同一住所の微小散布（ピン重なり防止）
+                angle = (idx * 137.5) * (math.pi / 180.0)
+                lat += 0.0003 * math.sin(angle)
+                lon += 0.0004 * math.cos(angle)
+            else:
+                # 第2候補: エリア辞書マッチ
+                spot_base = None
+                for k, v in AREA_COORDINATES.items():
+                    if k in addr:
+                        spot_base = v
+                        break
+                if not spot_base:
+                    spot_base = base_coord
+                
+                # 周辺への自然な幾何学的散布（同心・多角形オフセット: 約300m〜1km）
+                angle = (idx * 137.5) * (math.pi / 180.0)  # 黄金比アングル
+                radius = 0.003 + (idx % 4) * 0.002
+                lat = spot_base[0] + radius * math.sin(angle)
+                lon = spot_base[1] + (radius * 1.25) * math.cos(angle)
             s["lat"], s["lon"] = lat, lon
             
         name = safe_nfc(s.get("name", f"スポット {idx+1}"))
