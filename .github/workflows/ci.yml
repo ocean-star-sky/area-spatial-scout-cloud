@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 日本語フォントを導入 (地図ラベル生成で使用)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends fonts-noto-cjk
+
+      - name: 依存関係をインストール
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint (ruff)
+        run: ruff check --output-format=github .
+
+      - name: テスト
+        run: pytest -q

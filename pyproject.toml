@@ -1,0 +1,15 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# F: 未定義名・未使用 import (ImageDraw 未定義を静的に捕まえた実績あり)
+# E9: 構文/実行時エラー相当, B: バグを生みやすい書き方, UP: 旧い書き方
+select = ["F", "E4", "E7", "E9", "B", "UP"]
+ignore = [
+    "B008",  # FastAPI の Depends()/Query() を引数既定値に置くのは正しい用法
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
