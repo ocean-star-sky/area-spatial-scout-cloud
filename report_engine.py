@@ -626,6 +626,11 @@ def create_docx_report(data: dict, output_path: Path, map_image_path: Path = Non
         area_notes.append(f"指定エリアから離れていたため除外: {names}")
     if meta.get("area_unverified_count"):
         area_notes.append(f"住所を確認できずエリア判定ができなかったスポット: {meta['area_unverified_count']}件")
+    if meta.get("address_backfilled_count"):
+        area_notes.append(
+            f"住所を追加の検索で補完したスポット: {meta['address_backfilled_count']}件"
+            "（番地の精度は一次情報でご確認ください）"
+        )
     if area_notes:
         add_callout_box(doc, "\n".join(area_notes), title="【エリア一致の検証について】")
 
@@ -858,6 +863,11 @@ def create_docx_report_mobile(data: dict, output_path: Path, map_image_path: Pat
         area_notes.append(f"指定エリアから離れていたため除外: {names}")
     if meta.get("area_unverified_count"):
         area_notes.append(f"住所を確認できずエリア判定ができなかったスポット: {meta['area_unverified_count']}件")
+    if meta.get("address_backfilled_count"):
+        area_notes.append(
+            f"住所を追加の検索で補完したスポット: {meta['address_backfilled_count']}件"
+            "（番地の精度は一次情報でご確認ください）"
+        )
     if area_notes:
         add_callout_box(doc, "\n".join(area_notes), title="【エリア一致の検証について】")
 

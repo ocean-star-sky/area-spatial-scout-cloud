@@ -296,6 +296,9 @@
           if (data.spots_count < data.requested_count) {
             meta.push(`検索で確認できたのは ${data.spots_count} 件でした（要求 ${data.requested_count} 件）`);
           }
+          if (data.address_backfilled_count) {
+            meta.push(`住所を追加取得で補完 ${data.address_backfilled_count} 件`);
+          }
           if (data.area_excluded_count) {
             meta.push(`指定エリア外の ${data.area_excluded_count} 件を除外`);
           }

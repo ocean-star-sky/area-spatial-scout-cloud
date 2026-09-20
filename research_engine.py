@@ -15,6 +15,7 @@ import json
 import os
 import re
 import socket
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -38,6 +39,11 @@ PHOTOS_PER_SPOT = 2
 # 実測 (新橋を基準): 銀座 0.5km / 虎ノ門 0.7km / 六本木 2.3km / 渋谷 5.2km /
 # 新宿 5.6km / 池袋 8.0km / 横浜 26km。同一・隣接と別エリアはこの値で分離できる。
 AREA_MATCH_RADIUS_KM = float(os.environ.get("AREA_MATCH_RADIUS_KM", "3.0"))
+
+# 住所が空だったスポットについて、住所だけを聞き直す追加リクエストを行うか。
+# 1リクエスト増えるため、Gemini のモデル別日次上限を使い切る環境では無効化できる。
+ADDRESS_BACKFILL_ENABLED = os.environ.get("ADDRESS_BACKFILL", "1") != "0"
+ADDRESS_BACKFILL_MAX = int(os.environ.get("ADDRESS_BACKFILL_MAX", "20"))
 
 
 class ResearchUnavailable(RuntimeError):
@@ -287,6 +293,91 @@ def _extract_text_and_sources(res_json: dict) -> tuple[str, list[dict], list[str
     return text, sources, queries
 
 
+def _normalize_name(name: str) -> str:
+    """施設名の照合用キー。全角/半角・空白・大小文字の揺れを吸収する。"""
+    return unicodedata.normalize("NFKC", str(name or "")).replace(" ", "").replace("　", "").casefold()
+
+
+def build_address_backfill_prompt(names: list[str], area: str, theme: str) -> str:
+    """住所が空のままの施設について、住所だけを問い合わせるプロンプト"""
+    listing = "\n".join(f"- {n}" for n in names)
+    return f"""Google検索を使い、次の施設 (「{area}」周辺の「{theme}」) それぞれの所在地を調べてください。
+
+{listing}
+
+【厳守】
+- 住所は都道府県から始まる正式表記にすること。
+- 検索で確認できなかった施設は address を空文字 "" にすること。推測で住所を書かないこと。
+- 入力した施設名を name にそのまま使い、勝手に別施設へ置き換えないこと。
+- 出力は ```json ... ``` の中に次の形のJSONのみ。前置き・解説は不要。
+
+{{"results": [{{"name": "施設名", "address": "東京都…", "source_url": ""}}]}}"""
+
+
+def backfill_addresses(
+    spots: list[dict],
+    area: str,
+    theme: str,
+    api_key: str,
+    models: tuple = DEFAULT_MODELS,
+) -> int:
+    """住所が空のスポットについて、追加の1リクエストで住所だけを補完する。
+
+    1回目の一括調査は 1 リクエストで全項目を埋めさせるため、住所が空で返ることが多い
+    (実測: 新橋×サウナ 8件中 4件が空)。対象を絞って住所だけを聞き直すと埋まる
+    (実測: 空だった 4件のうち 3件を補完)。
+
+    補完できなかったものは空のまま残す。ここで推測住所を入れてはいけない。
+    失敗しても例外を投げない (補完は付加価値であって、調査本体の成否ではない)。
+    """
+    if not ADDRESS_BACKFILL_ENABLED:
+        return 0
+
+    targets = [s for s in spots if not (s.get("address") or "").strip() and (s.get("name") or "").strip()]
+    if not targets:
+        return 0
+    targets = targets[:ADDRESS_BACKFILL_MAX]
+
+    prompt = build_address_backfill_prompt([s["name"] for s in targets], area, theme)
+    text = ""
+    for model in models:
+        try:
+            text, _sources, _queries = _extract_text_and_sources(call_gemini(model, prompt, api_key))
+        except Exception as e:
+            print(f"[Address Backfill] {model} で失敗: {type(e).__name__}")
+            continue
+        if text:
+            break
+    if not text:
+        print("[Address Backfill] 住所の追加取得ができませんでした (空のまま扱います)")
+        return 0
+
+    try:
+        rows = extract_json_from_text(text).get("results", [])
+    except Exception as e:
+        print(f"[Address Backfill] 応答を解析できません: {e}")
+        return 0
+
+    by_name = {_normalize_name(s["name"]): s for s in targets}
+    filled = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        spot = by_name.get(_normalize_name(row.get("name")))
+        address = (row.get("address") or "").strip()
+        # 既に住所があるものは上書きしない (1回目の結果を後から薄い根拠で置き換えない)
+        if not spot or not address or (spot.get("address") or "").strip():
+            continue
+        spot["address"] = address
+        spot["address_source"] = "backfill"
+        if row.get("source_url"):
+            spot["address_source_url"] = row["source_url"]
+        filled += 1
+
+    print(f"[Address Backfill] {len(targets)}件中 {filled}件の住所を補完しました")
+    return filled
+
+
 def _area_tokens(area: str) -> list[str]:
     """エリア指定から住所照合に使う語を作る (「新橋駅」「新橋エリア」→「新橋」)"""
     base = (area or "").strip()
@@ -480,6 +571,8 @@ def run_autonomous_research(
         raise ResearchUnavailable("調査結果にスポット一覧が含まれていません", reasons)
 
     by_genre = filter_by_genre([s for s in spots if isinstance(s, dict)], theme)
+    # エリア判定より前に住所を補完する。住所が無いとエリアの確認も地図掲載もできないため。
+    backfilled = backfill_addresses(by_genre, area, theme, key, models)
     in_area, out_of_area = verify_area_match(by_genre, area)
     data["spots"] = in_area[:count]
     if not data["spots"]:
@@ -501,6 +594,8 @@ def run_autonomous_research(
     meta["requested_count"] = count
     meta["returned_count"] = len(data["spots"])
     meta["area_match_radius_km"] = AREA_MATCH_RADIUS_KM
+    meta["address_backfilled_count"] = sum(1 for s in data["spots"] if s.get("address_source") == "backfill")
+    meta["address_backfill_attempted"] = backfilled
     meta["area_verified_count"] = sum(1 for s in data["spots"] if s.get("area_match") in ("address", "proximity"))
     meta["area_unverified_count"] = sum(1 for s in data["spots"] if s.get("area_match") == "unverified")
     meta["area_excluded"] = [

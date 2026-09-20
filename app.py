@@ -260,6 +260,7 @@ def scout_instant_endpoint(req: ScoutRequest):
         "area_verified_count": data.get("meta", {}).get("area_verified_count", 0),
         "area_unverified_count": data.get("meta", {}).get("area_unverified_count", 0),
         "area_excluded_count": len(data.get("meta", {}).get("area_excluded", [])),
+        "address_backfilled_count": data.get("meta", {}).get("address_backfilled_count", 0),
         "elapsed_seconds": round(elapsed, 2),
         "map_url": f"/api/download/{job_id}/map?t={token}",
         "mobile_docx_url": f"/api/download/{job_id}/mobile_docx?t={token}",

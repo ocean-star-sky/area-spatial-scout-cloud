@@ -16,6 +16,17 @@ import research_engine
 from research_engine import ResearchUnavailable, classify_genre, extract_json_from_text, filter_by_genre
 
 
+@pytest.fixture(autouse=True)
+def _no_address_backfill(monkeypatch):
+    """既定では住所の追加取得を止める。
+
+    有効なままだと「モデルのカスケードで何回呼んだか」を数えるテストに
+    追加リクエストが混ざり、検証したい対象がぼやける。
+    backfill 自体は test_address_backfill.py で個別に検証する。
+    """
+    monkeypatch.setattr(research_engine, "ADDRESS_BACKFILL_ENABLED", False)
+
+
 class _FakeResponse(io.BytesIO):
     def __enter__(self):
         return self
