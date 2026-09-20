@@ -292,6 +292,48 @@ MUTATIONS = [
         "    if not page_url:\n        return None",
         "tests/test_research_engine.py::test_og_fetch_is_skipped_for_urls_we_must_not_open",
     ),
+    (
+        "JSON を読めない応答で即座に落ちる (候補モデルを残したまま 502)",
+        "research_engine.py",
+        "            continue\n\n        if not isinstance(cand_data, dict) or not isinstance(cand_data.get(\"spots\"), list):",
+        "            raise ResearchUnavailable(\"調査結果の解析に失敗しました\", reasons)\n\n        if not isinstance(cand_data, dict) or not isinstance(cand_data.get(\"spots\"), list):",
+        "tests/test_research_engine.py::test_unparsable_response_falls_through_to_the_next_model",
+    ),
+    (
+        "間欠的な不良応答の再試行を撤去",
+        "research_engine.py",
+        "            if retry_budget > 0 and model not in retried:",
+        "            if False:",
+        "tests/test_research_engine.py::test_a_model_that_returned_prose_is_retried_once",
+    ),
+    (
+        "再試行の上限を外す (1ジョブで無料枠を食い潰す)",
+        "research_engine.py",
+        'PARSE_RETRY_BUDGET = int(os.environ.get("PARSE_RETRY_BUDGET", "1"))',
+        'PARSE_RETRY_BUDGET = int(os.environ.get("PARSE_RETRY_BUDGET", "99"))',
+        "tests/test_research_engine.py::test_parse_retries_are_capped",
+    ),
+    (
+        "spots が無い応答も採用する",
+        "research_engine.py",
+        '        if not isinstance(cand_data, dict) or not isinstance(cand_data.get("spots"), list):',
+        "        if False:",
+        "tests/test_research_engine.py::test_response_without_a_spots_list_falls_through",
+    ),
+    (
+        "パース失敗の理由から finishReason を落とす (次の切り分けができない)",
+        "research_engine.py",
+        'reasons.append(f"{model}: JSONパース失敗: {parse_err} (finishReason={finish})")',
+        'reasons.append(f"{model}: JSONパース失敗")',
+        "tests/test_research_engine.py::test_unparsable_failure_reasons_name_the_model_and_finish_reason",
+    ),
+    (
+        "プロンプトから前置き禁止を外す",
+        "research_engine.py",
+        "   応答の最初の文字から ```json で始めること。調査の経過・前置き・要約文・謝辞を",
+        "   なるべく簡潔に書くこと。",
+        "tests/test_research_engine.py::test_prompt_forbids_a_prose_preamble",
+    ),
 ]
 
 

@@ -347,3 +347,121 @@ def test_og_fetch_is_skipped_for_urls_we_must_not_open(monkeypatch):
     assert research_engine.fetch_og_image_url("") is None
     assert research_engine.fetch_og_image_url("file:///etc/passwd") is None
     assert research_engine.fetch_og_image_url("http://127.0.0.1/") is None
+
+
+# --------------------------------------------------------------------------- 不良応答のフォールスルー
+# 実測 (9/20 18:14 阿佐ヶ谷×韓国料理 Top10):
+#   gemini-flash-latest 429 -> gemini-2.5-flash が 48秒かけて応答 (検索クエリ11件で
+#   グラウンディングは成立) -> しかし '{' を1文字も含まない散文で 502。
+#   候補モデルが 1 つ残っていたのに試されず、同じ条件の再実行では正常な JSON が返った。
+_PROSE = "承知しました。阿佐ヶ谷の韓国料理店を調査した結果をご報告します。まず..."
+_VALID = '```json {"spots": [{"name": "テスト韓国料理"}]} ```'
+
+
+def _prose_body(finish_reason="STOP"):
+    body = json.loads(_gemini_body(_PROSE, [], ["阿佐ヶ谷 韓国料理"]).decode("utf-8"))
+    body["candidates"][0]["finishReason"] = finish_reason
+    return json.dumps(body).encode("utf-8")
+
+
+def test_unparsable_response_falls_through_to_the_next_model(monkeypatch):
+    calls = []
+
+    def _fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        if len(calls) == 1:
+            return _FakeResponse(_prose_body())
+        return _FakeResponse(_gemini_body(_VALID, [], ["阿佐ヶ谷 韓国料理"]))
+
+    monkeypatch.setattr(research_engine.urllib.request, "urlopen", _fake_urlopen)
+    data = research_engine.run_autonomous_research(area="阿佐ヶ谷", theme="韓国料理", count=3, api_key="k")
+
+    assert data["spots"][0]["name"] == "テスト韓国料理"
+    assert len(calls) == 2
+
+
+def test_a_model_that_returned_prose_is_retried_once(monkeypatch):
+    """不良応答は間欠的なので、1 巡したあとに同じモデルをもう一度試す"""
+    calls = []
+
+    def _fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        if len(calls) == 1:
+            return _FakeResponse(_prose_body())
+        return _FakeResponse(_gemini_body(_VALID, [], ["阿佐ヶ谷 韓国料理"]))
+
+    monkeypatch.setattr(research_engine.urllib.request, "urlopen", _fake_urlopen)
+    data = research_engine.run_autonomous_research(
+        area="阿佐ヶ谷", theme="韓国料理", count=3, api_key="k", models=("only-model",)
+    )
+
+    assert data["spots"][0]["name"] == "テスト韓国料理"
+    assert len(calls) == 2, "候補が1つでも、不良応答なら1度は再試行すること"
+    assert all("only-model" in url for url in calls)
+
+
+def test_parse_retries_are_capped(monkeypatch):
+    """再試行が無制限だと、無料枠の日次上限を 1 ジョブで食い潰す"""
+    calls = []
+
+    def _fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        return _FakeResponse(_prose_body())
+
+    monkeypatch.setattr(research_engine.urllib.request, "urlopen", _fake_urlopen)
+
+    with pytest.raises(ResearchUnavailable):
+        research_engine.run_autonomous_research(
+            area="阿佐ヶ谷", theme="韓国料理", count=3, api_key="k", models=("m1", "m2")
+        )
+
+    # モデル 2 つ + 再試行 1 回。予算は monkeypatch せず既定値のまま測る
+    # (差し替えると「既定値がいくつでも通るテスト」になり、上限の緩みを検出できない)
+    assert len(calls) == 3
+
+
+def test_parse_retry_budget_default_is_small():
+    """既定値そのものを固定する。緩めると 1 ジョブで無料枠の日次上限を食い潰す。"""
+    assert 0 <= research_engine.PARSE_RETRY_BUDGET <= 2
+
+
+def test_unparsable_failure_reasons_name_the_model_and_finish_reason(monkeypatch):
+    monkeypatch.setattr(
+        research_engine.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _FakeResponse(_prose_body("MAX_TOKENS")),
+    )
+
+    with pytest.raises(ResearchUnavailable) as err:
+        research_engine.run_autonomous_research(
+            area="阿佐ヶ谷", theme="韓国料理", count=3, api_key="k", models=("m1",)
+        )
+
+    joined = " / ".join(err.value.reasons)
+    assert "m1" in joined
+    assert "JSONパース失敗" in joined
+    assert "MAX_TOKENS" in joined, "次の切り分けに要るので finishReason を残すこと"
+
+
+def test_response_without_a_spots_list_falls_through(monkeypatch):
+    """JSON として読めても spots が無い応答は使えない"""
+    calls = []
+
+    def _fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        if len(calls) == 1:
+            return _FakeResponse(_gemini_body('```json {"meta": {"area": "阿佐ヶ谷"}} ```', [], ["阿佐ヶ谷"]))
+        return _FakeResponse(_gemini_body(_VALID, [], ["阿佐ヶ谷 韓国料理"]))
+
+    monkeypatch.setattr(research_engine.urllib.request, "urlopen", _fake_urlopen)
+    data = research_engine.run_autonomous_research(area="阿佐ヶ谷", theme="韓国料理", count=3, api_key="k")
+
+    assert data["spots"][0]["name"] == "テスト韓国料理"
+    assert len(calls) == 2
+
+
+def test_prompt_forbids_a_prose_preamble():
+    prompt = research_engine.build_prompt("阿佐ヶ谷", "韓国料理", 10)
+
+    assert "前置き" in prompt
+    assert "```json で始める" in prompt
