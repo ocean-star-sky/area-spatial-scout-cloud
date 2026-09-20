@@ -154,6 +154,9 @@ DRIVE_PARENT_FOLDER_ID=<フォルダID> python3 drive_uploader.py
 | `AREA_MATCH_RADIUS_KM` | － | エリア一致とみなす半径 (km)。既定 `3.0`。狭めると隣接エリアも除外される |
 | `ADDRESS_BACKFILL` | － | `0` で住所の追加取得を無効化。1 回あたり Gemini リクエストが 1 増えるため、モデル別の日次上限を使い切る環境では止められる |
 | `ADDRESS_BACKFILL_MAX` | － | 追加取得で問い合わせる施設数の上限。既定 `20` |
+| `REVIEWS_TARGET` | － | 1 施設あたりのクチコミ目標件数。既定 `8`（レポートの表示枠と同数） |
+| `REVIEW_BACKFILL` | － | `0` でクチコミの追加取得を無効化。1 回あたり Gemini リクエストが 1 増える |
+| `REVIEW_BACKFILL_MAX` | － | クチコミの追加取得で問い合わせる施設数の上限。既定 `20` |
 | `SCOUT_DEBUG_ENABLED` | － | `1` のとき診断 API `/api/scout/debug` を有効化（Gemini を消費します） |
 
 ## 🔌 API
