@@ -91,6 +91,22 @@ def safe_filename_component(val, default: str = "未指定", max_len: int = 60) 
     return text[:max_len] or default
 
 
+def review_source_note(spot: dict, idx: int) -> str:
+    """クチコミに添える出典表記。出典が無ければ空文字。
+
+    写真キャプションと同じ「（出典: host）」の体裁に揃える。research_engine 側で
+    reviews と review_sources は同じ長さに正規化されている。
+    """
+    sources = spot.get("review_sources")
+    if not isinstance(sources, list) or idx >= len(sources):
+        return ""
+    url = str(sources[idx] or "").strip()
+    if not url:
+        return ""
+    host = urllib.parse.urlparse(url).netloc
+    return f"（出典: {host}）" if host else ""
+
+
 def make_google_maps_url(name: str, address: str) -> str:
     """施設名と住所からGoogleマップの検索URLを生成"""
     query = f"{name} {address}".strip()
@@ -620,6 +636,16 @@ def create_docx_report(data: dict, output_path: Path, map_image_path: Path = Non
     r_sum = p_sum.add_run(safe_nfc(meta.get("summary_text", "")))
     format_run(r_sum, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MAIN_HEX)
 
+    if meta.get("grounding_status") == "ungrounded":
+        add_callout_box(
+            doc,
+            "この調査では Google 検索が実行されませんでした（モデル側の上限・タイムアウトのため）。"
+            "\n実在の裏取りができないため、利用者のクチコミは掲載していません。"
+            "\n記載内容は公式サイト等の一次情報でご確認ください。",
+            title="【重要: 検索による裏取りができていません】",
+            border_color_hex=COLOR_ACCENT_GOLD,
+        )
+
     area_notes = []
     if meta.get("area_excluded"):
         names = "、".join(f"{e['name']}({e.get('distance_km')}km)" for e in meta["area_excluded"][:5])
@@ -803,6 +829,10 @@ def create_docx_report(data: dict, output_path: Path, map_image_path: Path = Non
                         format_run(r_num_b, font_name=FONT_JP, size_pt=12.0, bold=True, color_hex=COLOR_ACCENT_HEX)
                         r_rev = p_c.add_run(f"「{safe_nfc(reviews[cell_idx])}」")
                         format_run(r_rev, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MAIN_HEX)
+                        note = review_source_note(s, cell_idx)
+                        if note:
+                            r_src = p_c.add_run(f" {note}")
+                            format_run(r_src, font_name=FONT_JP, size_pt=9.0, color_hex=COLOR_TEXT_MUTED_HEX)
 
     # 第3部: 戦略的示唆
     doc.add_page_break()
@@ -856,6 +886,16 @@ def create_docx_report_mobile(data: dict, output_path: Path, map_image_path: Pat
     p_sum.paragraph_format.space_after = Pt(3)
     r_sum = p_sum.add_run(safe_nfc(meta.get("summary_text", "")))
     format_run(r_sum, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MAIN_HEX)
+
+    if meta.get("grounding_status") == "ungrounded":
+        add_callout_box(
+            doc,
+            "この調査では Google 検索が実行されませんでした（モデル側の上限・タイムアウトのため）。"
+            "\n実在の裏取りができないため、利用者のクチコミは掲載していません。"
+            "\n記載内容は公式サイト等の一次情報でご確認ください。",
+            title="【重要: 検索による裏取りができていません】",
+            border_color_hex=COLOR_ACCENT_GOLD,
+        )
 
     area_notes = []
     if meta.get("area_excluded"):
@@ -988,6 +1028,10 @@ def create_docx_report_mobile(data: dict, output_path: Path, map_image_path: Pat
             format_run(r_num_b, font_name=FONT_JP, size_pt=12.0, bold=True, color_hex=COLOR_ACCENT_HEX)
             r_text = p_rev.add_run(f"「{safe_nfc(rev)}」")
             format_run(r_text, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MAIN_HEX)
+            note = review_source_note(s, r_idx)
+            if note:
+                r_src = p_rev.add_run(f" {note}")
+                format_run(r_src, font_name=FONT_JP, size_pt=9.0, color_hex=COLOR_TEXT_MUTED_HEX)
 
     doc.add_page_break()
     advice_sec_no = sec_no + 1

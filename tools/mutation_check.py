@@ -236,6 +236,62 @@ MUTATIONS = [
         "#!/bin/bash\nb64 = '" + "H4s" + "I" + "A" * 220 + "'\nt." + "extract" + "all('.')\n",
         "tests/test_deploy_hygiene.py",
     ),
+    (
+        "検索が走らなかった応答も即採用する (裏取り無しの素通り復活)",
+        "research_engine.py",
+        "        if not cand_queries:",
+        "        if False:",
+        "tests/test_research_engine.py::test_grounded_response_wins_over_an_earlier_ungrounded_one",
+    ),
+    (
+        "未グラウンディングでもクチコミを載せる",
+        "research_engine.py",
+        "    if grounded:\n        reviews_added = backfill_reviews(data[\"spots\"], area, theme, key, models)",
+        "    if True:\n        reviews_added = backfill_reviews(data[\"spots\"], area, theme, key, models)",
+        "tests/test_no_fabrication.py::test_ungrounded_response_carries_no_reviews",
+    ),
+    (
+        "出典の無いクチコミも採る (件数合わせの創作が通る)",
+        "research_engine.py",
+        '        if not body or not source.startswith("http"):',
+        "        if not body:",
+        "tests/test_no_fabrication.py::test_reviews_without_a_source_are_not_merged",
+    ),
+    (
+        "クチコミ補完で既存の声を捨てて置き換える",
+        "research_engine.py",
+        "    normalize_spot_reviews(spot)\n    texts = spot[\"reviews\"]\n    sources = spot[\"review_sources\"]",
+        "    normalize_spot_reviews(spot)\n    texts = spot[\"reviews\"]\n    del texts[:]\n    sources = spot[\"review_sources\"]\n    del sources[:]",
+        "tests/test_review_backfill.py::test_existing_reviews_are_kept_and_duplicates_are_skipped",
+    ),
+    (
+        "クチコミの重複判定を撤去 (同じ声で枠を埋める)",
+        "research_engine.py",
+        "        if key in seen:\n            continue",
+        "        if False:\n            continue",
+        "tests/test_review_backfill.py::test_existing_reviews_are_kept_and_duplicates_are_skipped",
+    ),
+    (
+        "公式サイトの OGP 画像を使わない (写真ゼロの状態へ巻き戻し)",
+        "research_engine.py",
+        "            og_url = fetch_og_image_url(s.get(\"url\") or \"\")",
+        "            og_url = None",
+        "tests/test_research_engine.py::test_og_image_is_used_when_the_response_has_no_photo_urls",
+    ),
+    (
+        "OGP 画像URLを検証せず取得する (外部ページ由来の SSRF)",
+        "research_engine.py",
+        "        candidate = urllib.parse.urljoin(final_url, html.unescape(found[key]))\n        if is_public_http_url(candidate):",
+        "        candidate = urllib.parse.urljoin(final_url, html.unescape(found[key]))\n        if True:",
+        "tests/test_research_engine.py::test_og_image_pointing_at_an_internal_address_is_rejected",
+    ),
+    (
+        "OGP 取得前の URL 検証を撤去 (file:// や内部アドレスを開く)",
+        "research_engine.py",
+        "    if not page_url or not is_public_http_url(page_url):\n        return None",
+        "    if not page_url:\n        return None",
+        "tests/test_research_engine.py::test_og_fetch_is_skipped_for_urls_we_must_not_open",
+    ),
 ]
 
 

@@ -10,6 +10,7 @@ Google Gemini API (Google Search Grounding) でエリア×テーマのスポッ�
   作って返すことは行わない (調査レポートとしての信頼性を優先する)。
 """
 
+import html
 import ipaddress
 import json
 import os
@@ -31,7 +32,7 @@ from geocoding import geocode_address, haversine_km
 # そのため候補は必ず別モデルを並べ、1 モデルが枯渇しても次へ落ちるようにする。
 DEFAULT_MODELS = ("gemini-flash-latest", "gemini-2.5-flash", "gemini-2.5-flash-lite")
 API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
-REQUEST_TIMEOUT = 30.0
+REQUEST_TIMEOUT = 60.0
 MAX_OUTPUT_TOKENS = 8192
 PHOTOS_PER_SPOT = 2
 
@@ -44,6 +45,17 @@ AREA_MATCH_RADIUS_KM = float(os.environ.get("AREA_MATCH_RADIUS_KM", "3.0"))
 # 1リクエスト増えるため、Gemini のモデル別日次上限を使い切る環境では無効化できる。
 ADDRESS_BACKFILL_ENABLED = os.environ.get("ADDRESS_BACKFILL", "1") != "0"
 ADDRESS_BACKFILL_MAX = int(os.environ.get("ADDRESS_BACKFILL_MAX", "20"))
+
+# クチコミの目標件数。レポートの表示枠 (report_engine の mobile 版が reviews[:8]) に合わせる。
+# 1回目の一括調査でここまで求めると JSON が maxOutputTokens で途切れてスポットごと落ちるため、
+# 本調査とは別リクエストで集める (住所の backfill と同じ形)。
+REVIEWS_TARGET = int(os.environ.get("REVIEWS_TARGET", "8"))
+REVIEW_BACKFILL_ENABLED = os.environ.get("REVIEW_BACKFILL", "1") != "0"
+REVIEW_BACKFILL_MAX = int(os.environ.get("REVIEW_BACKFILL_MAX", "20"))
+
+# 公式サイトから OGP 画像を拾うときの制限。HTML は先頭だけ読めば meta に届く。
+OG_FETCH_TIMEOUT = 5.0
+OG_HTML_MAX_BYTES = 512 * 1024
 
 
 class ResearchUnavailable(RuntimeError):
@@ -119,6 +131,94 @@ def download_and_crop_image(url: str, output_path: Path, target_w: int = 1200, t
         print(f"[Warning] 画像ダウンロード失敗 ({url}): {e}")
         output_path.unlink(missing_ok=True)
         return False
+
+
+class _ValidatedRedirect(urllib.request.HTTPRedirectHandler):
+    """転送先を毎ホップ検証する。
+
+    公式サイトは http->https や www 付与で転送するのが普通なので、画像直取得で使う
+    _NoRedirect (転送全面禁止) をページ取得に流用すると大半が取れない。かわりに
+    転送先URLを1ホップずつ is_public_http_url に通し、内部アドレスへ誘導されたら止める。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not is_public_http_url(newurl):
+            print(f"[OGP] 転送先が許可されないためたどりません: {newurl[:80]}")
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _fetch_html_head(page_url: str) -> tuple[str, str] | None:
+    """ページ HTML の先頭 (最大 OG_HTML_MAX_BYTES) を取得する。(最終URL, HTML) を返す。"""
+    opener = urllib.request.build_opener(_ValidatedRedirect)
+    req = urllib.request.Request(
+        page_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "text/html,application/xhtml+xml",
+        },
+    )
+    try:
+        with opener.open(req, timeout=OG_FETCH_TIMEOUT) as res:
+            ctype = (res.headers.get("Content-Type") or "").lower()
+            if ctype and "html" not in ctype:
+                return None
+            raw = res.read(OG_HTML_MAX_BYTES)
+            charset = res.headers.get_content_charset() or "utf-8"
+            final_url = res.geturl() or page_url
+    except Exception as e:
+        print(f"[OGP] ページを取得できません ({page_url[:60]}): {type(e).__name__}")
+        return None
+    try:
+        return final_url, raw.decode(charset, errors="ignore")
+    except LookupError:
+        return final_url, raw.decode("utf-8", errors="ignore")
+
+
+# og:image を優先し、無ければ twitter:image を使う。
+_OG_IMAGE_KEYS = ("og:image", "og:image:secure_url", "og:image:url", "twitter:image", "twitter:image:src")
+_META_TAG_RE = re.compile(r"<meta\b[^>]*>", re.IGNORECASE)
+_META_KEY_RE = re.compile(r"(?:property|name)\s*=\s*[\"\']?\s*([a-zA-Z0-9:_-]+)", re.IGNORECASE)
+_META_CONTENT_RE = re.compile(r"content\s*=\s*[\"\']([^\"\']+)[\"\']", re.IGNORECASE)
+
+
+def fetch_og_image_url(page_url: str) -> str | None:
+    """公式サイトの OGP 画像URLを返す。取得できなければ None。
+
+    Gemini は photo_urls を空で返すことが多い (実測: 3ジョブ連続で 0件)。
+    施設の公式サイトは本調査で既に取れているので、そのページが自ら宣言している
+    代表画像 (og:image) を写真候補にする。追加の外部APIは使わない。
+    """
+    page_url = (page_url or "").strip()
+    if not page_url or not is_public_http_url(page_url):
+        return None
+    fetched = _fetch_html_head(page_url)
+    if not fetched:
+        return None
+    final_url, html_text = fetched
+
+    found: dict[str, str] = {}
+    for tag in _META_TAG_RE.finditer(html_text):
+        raw_tag = tag.group(0)
+        m_key = _META_KEY_RE.search(raw_tag)
+        if not m_key:
+            continue
+        key = m_key.group(1).lower()
+        if key not in _OG_IMAGE_KEYS or key in found:
+            continue
+        m_val = _META_CONTENT_RE.search(raw_tag)
+        if m_val and m_val.group(1).strip():
+            found[key] = m_val.group(1).strip()
+
+    for key in _OG_IMAGE_KEYS:
+        if key not in found:
+            continue
+        # OGP の content は相対パスでも規約違反ではないため絶対URLへ直す
+        candidate = urllib.parse.urljoin(final_url, html.unescape(found[key]))
+        if is_public_http_url(candidate):
+            return candidate
+        print(f"[OGP] 画像URLが許可されないため使いません: {candidate[:80]}")
+    return None
 
 
 def extract_json_from_text(text: str) -> dict:
@@ -378,6 +478,152 @@ def backfill_addresses(
     return filled
 
 
+def _review_key(text: str) -> str:
+    """クチコミの重複判定キー。表記の揺れと空白を吸収する。"""
+    return unicodedata.normalize("NFKC", str(text or "")).replace(" ", "").replace("　", "").casefold()
+
+
+def normalize_spot_reviews(spot: dict) -> None:
+    """spot["reviews"] を文字列の配列へ揃え、出典を review_sources に並置する。
+
+    レポート側 (report_engine) は reviews の要素を文字列として扱う (safe_nfc に渡す) ため、
+    LLM が {"text": ..., "source_url": ...} 形式で返した場合もここで平坦化しておく。
+    """
+    raw = spot.get("reviews")
+    if not isinstance(raw, list):
+        spot["reviews"] = []
+        spot["review_sources"] = []
+        return
+    prior_sources = spot.get("review_sources")
+    texts: list[str] = []
+    sources: list[str] = []
+    for i, item in enumerate(raw):
+        if isinstance(item, dict):
+            body = str(item.get("text") or item.get("review") or "").strip()
+            source = str(item.get("source_url") or "").strip()
+        else:
+            body = str(item or "").strip()
+            source = ""
+            if isinstance(prior_sources, list) and i < len(prior_sources):
+                source = str(prior_sources[i] or "").strip()
+        if not body:
+            continue
+        texts.append(body)
+        sources.append(source)
+    spot["reviews"] = texts
+    spot["review_sources"] = sources
+
+
+def merge_reviews(spot: dict, incoming) -> int:
+    """出典付きのクチコミを既存へ追記する。既存は消さず、重複と出典無しは採らない。"""
+    if not isinstance(incoming, list):
+        return 0
+    normalize_spot_reviews(spot)
+    texts = spot["reviews"]
+    sources = spot["review_sources"]
+    seen = {_review_key(t) for t in texts}
+    added = 0
+    for item in incoming:
+        if len(texts) >= REVIEWS_TARGET:
+            break
+        # 出典を言えないクチコミは採らない (実在の裏取りができないため)
+        if not isinstance(item, dict):
+            continue
+        body = str(item.get("text") or "").strip()
+        source = str(item.get("source_url") or "").strip()
+        if not body or not source.startswith("http"):
+            continue
+        key = _review_key(body)
+        if key in seen:
+            continue
+        seen.add(key)
+        texts.append(body)
+        sources.append(source)
+        added += 1
+    return added
+
+
+def build_review_backfill_prompt(names: list[str], area: str, theme: str, target: int) -> str:
+    """クチコミが足りない施設について、クチコミだけを問い合わせるプロンプト"""
+    listing = "\n".join(f"- {n}" for n in names)
+    return f"""Google検索を使い、次の施設 (「{area}」周辺の「{theme}」) それぞれの利用者のクチコミを調べてください。
+
+{listing}
+
+【厳守】
+- 検索結果に実際に存在した利用者の声の要約のみを入れること。
+  実在のクチコミが見つからない場合は reviews を空配列 [] にすること。創作は禁止。
+- 1施設あたり最大{target}件。1件は60〜120字程度の要約にすること。
+- text ごとに、その声を確認できたページの URL を source_url に必ず入れること。
+  URL を示せない声は挙げないこと。
+- 入力した施設名を name にそのまま使い、勝手に別施設へ置き換えないこと。
+- 出力は ```json ... ``` の中に次の形のJSONのみ。前置き・解説は不要。
+
+{{"results": [{{"name": "施設名", "reviews": [{{"text": "クチコミの要約", "source_url": "https://…"}}]}}]}}"""
+
+
+def backfill_reviews(
+    spots: list[dict],
+    area: str,
+    theme: str,
+    api_key: str,
+    models: tuple = DEFAULT_MODELS,
+) -> int:
+    """クチコミが目標件数に届かないスポットについて、追加の1リクエストで補完する。
+
+    1回目の一括調査でクチコミまで求めると maxOutputTokens で JSON が途切れ、
+    切り詰め修復でスポットごと落ちる。そのため住所と同じく対象を絞って聞き直す。
+    失敗しても例外を投げない (補完は付加価値であって、調査本体の成否ではない)。
+    """
+    if not REVIEW_BACKFILL_ENABLED:
+        return 0
+
+    for s in spots:
+        normalize_spot_reviews(s)
+
+    targets = [s for s in spots if (s.get("name") or "").strip() and len(s["reviews"]) < REVIEWS_TARGET]
+    if not targets:
+        return 0
+    targets = targets[:REVIEW_BACKFILL_MAX]
+
+    prompt = build_review_backfill_prompt([s["name"] for s in targets], area, theme, REVIEWS_TARGET)
+    text = ""
+    for model in models:
+        try:
+            text, _sources, _queries = _extract_text_and_sources(call_gemini(model, prompt, api_key))
+        except Exception as e:
+            print(f"[Review Backfill] {model} で失敗: {type(e).__name__}")
+            continue
+        if text:
+            break
+    if not text:
+        print("[Review Backfill] クチコミの追加取得ができませんでした (既存のまま扱います)")
+        return 0
+
+    try:
+        rows = extract_json_from_text(text).get("results", [])
+    except Exception as e:
+        print(f"[Review Backfill] 応答を解析できません: {e}")
+        return 0
+
+    by_name = {_normalize_name(s["name"]): s for s in targets}
+    added = 0
+    filled_spots = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        spot = by_name.get(_normalize_name(row.get("name")))
+        if not spot:
+            continue
+        got = merge_reviews(spot, row.get("reviews"))
+        added += got
+        if got:
+            filled_spots += 1
+
+    print(f"[Review Backfill] {len(targets)}件中 {filled_spots}件にクチコミを合計 {added}件追加しました")
+    return added
+
+
 def _area_tokens(area: str) -> list[str]:
     """エリア指定から住所照合に使う語を作る (「新橋駅」「新橋エリア」→「新橋」)"""
     base = (area or "").strip()
@@ -491,6 +737,12 @@ def attach_photos(data: dict, output_dir: Path) -> int:
     attached = 0
     for i, s in enumerate(data.get("spots", [])):
         urls = [u for u in (s.get("photo_urls") or []) if isinstance(u, str) and u.startswith("http")]
+        origins = ["llm"] * len(urls)
+        if not urls:
+            # 調査応答が画像URLを返さなかった場合だけ、公式サイトの OGP 画像を候補にする
+            og_url = fetch_og_image_url(s.get("url") or "")
+            if og_url:
+                urls, origins = [og_url], ["ogp"]
         photos = []
         slug = safe_spot_slug(s.get("id"), f"spot_{i + 1}")
         for p_idx, url in enumerate(urls[:PHOTOS_PER_SPOT]):
@@ -502,6 +754,7 @@ def attach_photos(data: dict, output_dir: Path) -> int:
                         "path": str(target),
                         "caption": f"{s.get('name', '')}（出典: {host}）",
                         "source_url": url,
+                        "photo_source": origins[p_idx],
                     }
                 )
         if photos:
@@ -534,6 +787,8 @@ def run_autonomous_research(
 
     reasons: list[str] = []
     text_resp, sources, queries = "", [], []
+    # 検索が走らなかった応答は捨てずに退避し、全モデルが未グラウンディングだった時だけ使う
+    ungrounded: tuple[str, list, list] | None = None
 
     for model in models:
         try:
@@ -548,11 +803,26 @@ def run_autonomous_research(
             print(f"[Warning] Gemini 通信エラー ({model}): {e}")
             continue
 
-        text_resp, sources, queries = _extract_text_and_sources(res_json)
-        if text_resp:
-            print(f"[Research Engine] モデル '{model}' で応答取得 (検索クエリ {len(queries)}件 / 出典 {len(sources)}件)")
-            break
-        reasons.append(f"{model}: 応答テキストが空")
+        cand_text, cand_sources, cand_queries = _extract_text_and_sources(res_json)
+        if not cand_text:
+            reasons.append(f"{model}: 応答テキストが空")
+            continue
+        if not cand_queries:
+            # 実測 (9/20 五反田): 検索クエリ 0件 = Google 検索を使わずに生成した応答。
+            # 裏取りが無いので、他のモデルで検索付きの応答が取れないか先に試す。
+            reasons.append(f"{model}: 検索が実行されていない (webSearchQueries 0件)")
+            print(f"[Warning] モデル '{model}' は検索を使わずに応答しました。次のモデルを試します")
+            if ungrounded is None:
+                ungrounded = (cand_text, cand_sources, cand_queries)
+            continue
+        text_resp, sources, queries = cand_text, cand_sources, cand_queries
+        print(f"[Research Engine] モデル '{model}' で応答取得 (検索クエリ {len(queries)}件 / 出典 {len(sources)}件)")
+        break
+
+    grounded = bool(text_resp)
+    if not grounded and ungrounded is not None:
+        text_resp, sources, queries = ungrounded
+        print("[Warning] どのモデルも検索を使えませんでした。裏取り無しの応答を使いますが、クチコミは掲載しません")
 
     if not text_resp:
         raise ResearchUnavailable("Gemini から調査結果を取得できませんでした", reasons)
@@ -585,6 +855,21 @@ def run_autonomous_research(
             ],
         )
 
+    # クチコミの形を揃えてから確定させる (LLM は文字列と {text, source_url} の両方を返しうる)
+    for s in data["spots"]:
+        normalize_spot_reviews(s)
+
+    if grounded:
+        reviews_added = backfill_reviews(data["spots"], area, theme, key, models)
+    else:
+        # 検索が走っていない応答の「利用者の声」は実在の裏取りが無い。載せない。
+        dropped = sum(len(s["reviews"]) for s in data["spots"])
+        for s in data["spots"]:
+            s["reviews"] = []
+            s["review_sources"] = []
+        reviews_added = 0
+        print(f"[Research Engine] 未グラウンディングのためクチコミ {dropped}件を掲載対象から外しました")
+
     meta = data.setdefault("meta", {})
     meta.setdefault("area", area)
     meta.setdefault("theme", theme)
@@ -596,6 +881,9 @@ def run_autonomous_research(
     meta["area_match_radius_km"] = AREA_MATCH_RADIUS_KM
     meta["address_backfilled_count"] = sum(1 for s in data["spots"] if s.get("address_source") == "backfill")
     meta["address_backfill_attempted"] = backfilled
+    meta["grounding_status"] = "grounded" if grounded else "ungrounded"
+    meta["reviews_backfilled_count"] = reviews_added
+    meta["reviews_total"] = sum(len(s.get("reviews") or []) for s in data["spots"])
     meta["area_verified_count"] = sum(1 for s in data["spots"] if s.get("area_match") in ("address", "proximity"))
     meta["area_unverified_count"] = sum(1 for s in data["spots"] if s.get("area_match") == "unverified")
     meta["area_excluded"] = [

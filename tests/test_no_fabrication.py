@@ -97,3 +97,35 @@ def test_no_photos_when_no_urls(tmp_path):
     data = {"spots": [{"id": "spot_1", "name": "テスト店", "photo_urls": []}]}
     assert research_engine.attach_photos(data, tmp_path) == 0
     assert "photos" not in data["spots"][0]
+
+
+def test_reviews_without_a_source_are_not_merged():
+    """出典を示せないクチコミは、件数を埋めるためであっても採らない"""
+    spot = {"reviews": []}
+
+    added = research_engine.merge_reviews(
+        spot,
+        ["出典のない声", {"text": "出典欄が空", "source_url": ""}, {"text": "出典あり", "source_url": "https://ok.example/1"}],
+    )
+
+    assert added == 1
+    assert spot["reviews"] == ["出典あり"]
+
+
+def test_ungrounded_response_carries_no_reviews(monkeypatch):
+    """検索が走らなかった応答の「利用者の声」は実在の裏取りが無いので載せない。
+
+    実測 (9/20 五反田×韓国料理): 検索クエリ 0件 / 出典 0件 のまま成果物になっていた。
+    """
+    monkeypatch.setattr(research_engine, "call_gemini", lambda *a, **k: {})
+    monkeypatch.setattr(
+        research_engine,
+        "_extract_text_and_sources",
+        lambda _res: ('```json {"spots": [{"name": "裏取り無し鮨", "reviews": ["よかった", "また行きたい"]}]} ```', [], []),
+    )
+
+    data = research_engine.run_autonomous_research(area="銀座", theme="鮨", count=3, api_key="dummy")
+
+    assert data["meta"]["grounding_status"] == "ungrounded"
+    assert data["spots"][0]["reviews"] == []
+    assert data["meta"]["reviews_total"] == 0

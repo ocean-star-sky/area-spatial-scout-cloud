@@ -22,9 +22,10 @@ def _no_address_backfill(monkeypatch):
 
     有効なままだと「モデルのカスケードで何回呼んだか」を数えるテストに
     追加リクエストが混ざり、検証したい対象がぼやける。
-    backfill 自体は test_address_backfill.py で個別に検証する。
+    backfill 自体は test_address_backfill.py / test_review_backfill.py で個別に検証する。
     """
     monkeypatch.setattr(research_engine, "ADDRESS_BACKFILL_ENABLED", False)
+    monkeypatch.setattr(research_engine, "REVIEW_BACKFILL_ENABLED", False)
 
 
 class _FakeResponse(io.BytesIO):
@@ -83,7 +84,7 @@ def test_falls_through_to_next_model_on_http_error(monkeypatch):
         calls.append(req.full_url)
         if len(calls) == 1:
             raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {}, io.BytesIO(b"quota"))
-        return _FakeResponse(_gemini_body('```json {"spots": [{"name": "テスト鮨"}]} ```'))
+        return _FakeResponse(_gemini_body('```json {"spots": [{"name": "テスト鮨"}]} ```', [], ["銀座 鮨"]))
 
     monkeypatch.setattr(research_engine.urllib.request, "urlopen", _fake_urlopen)
     data = research_engine.run_autonomous_research(area="銀座", theme="鮨", count=3, api_key="k")
@@ -210,3 +211,139 @@ def test_llm_supplied_id_cannot_escape_output_dir(tmp_path, monkeypatch):
     research_engine.attach_photos(data, job)
     written = pathlib.Path(data["spots"][0]["photos"][0]["path"]).resolve()
     assert written.parent == job.resolve(), "LLM の id でディレクトリを脱出した"
+
+
+# --------------------------------------------------------------------------- グラウンディング
+def test_grounded_response_wins_over_an_earlier_ungrounded_one(monkeypatch):
+    """検索を使わなかった応答があっても、検索付きの応答が取れるならそちらを採用する。
+
+    実測 (9/20 五反田): flash-latest が 429 → 2.5-flash がタイムアウト → lite が
+    「検索クエリ 0件」で応答し、裏取りの無い生成物がそのまま成果物になっていた。
+    """
+    calls = []
+
+    def _fake_urlopen(req, timeout=None):
+        calls.append(req.full_url)
+        if len(calls) == 1:
+            return _FakeResponse(_gemini_body('```json {"spots": [{"name": "裏取り無し鮨"}]} ```'))
+        return _FakeResponse(_gemini_body('```json {"spots": [{"name": "検索済み鮨"}]} ```', [], ["銀座 鮨"]))
+
+    monkeypatch.setattr(research_engine.urllib.request, "urlopen", _fake_urlopen)
+    data = research_engine.run_autonomous_research(area="銀座", theme="鮨", count=3, api_key="k")
+
+    assert data["spots"][0]["name"] == "検索済み鮨"
+    assert data["meta"]["grounding_status"] == "grounded"
+
+
+def test_all_models_ungrounded_is_marked_and_reviews_are_dropped(monkeypatch):
+    """全モデルが検索を使えなかった回は、結果は返すがクチコミは載せない。"""
+    body = '```json {"spots": [{"name": "裏取り無し鮨", "reviews": ["よかった", "また行きたい"]}]} ```'
+
+    monkeypatch.setattr(
+        research_engine.urllib.request,
+        "urlopen",
+        lambda req, timeout=None: _FakeResponse(_gemini_body(body)),
+    )
+    data = research_engine.run_autonomous_research(area="銀座", theme="鮨", count=3, api_key="k")
+
+    assert data["meta"]["grounding_status"] == "ungrounded"
+    assert data["spots"][0]["reviews"] == []
+    assert data["meta"]["reviews_total"] == 0
+
+
+# --------------------------------------------------------------------------- OGP 画像
+def test_og_image_is_used_when_the_response_has_no_photo_urls(tmp_path, monkeypatch):
+    """実測で photo_urls は空で返る。公式サイトの og:image を写真候補にする。"""
+    monkeypatch.setattr(research_engine, "fetch_og_image_url", lambda url: "https://shop.example/hero.jpg")
+    monkeypatch.setattr(
+        research_engine,
+        "download_and_crop_image",
+        lambda url, path, **k: path.write_bytes(b"x") or True,
+    )
+    data = {"spots": [{"id": "spot_1", "name": "テスト店", "url": "https://shop.example/", "photo_urls": []}]}
+
+    assert research_engine.attach_photos(data, tmp_path) == 1
+    photo = data["spots"][0]["photos"][0]
+    assert photo["photo_source"] == "ogp"
+    assert "shop.example" in photo["caption"]
+
+
+def test_og_image_is_not_fetched_when_the_response_gave_photo_urls(tmp_path, monkeypatch):
+    """調査応答が画像URLを返したときは、公式サイトを叩かない (余計な外部アクセスをしない)"""
+
+    def _must_not_be_called(url):
+        raise AssertionError("photo_urls があるのに OGP 取得が呼ばれた")
+
+    monkeypatch.setattr(research_engine, "fetch_og_image_url", _must_not_be_called)
+    monkeypatch.setattr(
+        research_engine,
+        "download_and_crop_image",
+        lambda url, path, **k: path.write_bytes(b"x") or True,
+    )
+    data = {
+        "spots": [
+            {
+                "id": "spot_1",
+                "name": "テスト店",
+                "url": "https://shop.example/",
+                "photo_urls": ["https://cdn.example/a.jpg"],
+            }
+        ]
+    }
+
+    assert research_engine.attach_photos(data, tmp_path) == 1
+    assert data["spots"][0]["photos"][0]["photo_source"] == "llm"
+
+
+@pytest.mark.parametrize(
+    "html_text,expected",
+    [
+        ('<meta property="og:image" content="/img/hero.jpg">', "https://shop.example/img/hero.jpg"),
+        ('<meta name="twitter:image" content="https://cdn.example/t.png">', "https://cdn.example/t.png"),
+        # og:image を twitter:image より優先する
+        (
+            '<meta name="twitter:image" content="https://cdn.example/t.png">'
+            '<meta property="og:image" content="https://cdn.example/og.png">',
+            "https://cdn.example/og.png",
+        ),
+        # 属性の順序が逆でも、HTMLエンティティが入っていても読む
+        ('<meta content="https://cdn.example/i.jpg?a=1&amp;b=2" property="og:image">', "https://cdn.example/i.jpg?a=1&b=2"),
+        ('<meta name="description" content="画像なし">', None),
+    ],
+)
+def test_og_image_extraction(monkeypatch, html_text, expected):
+    monkeypatch.setattr(research_engine, "is_public_http_url", lambda url: url.startswith("http"))
+    monkeypatch.setattr(research_engine, "_fetch_html_head", lambda url: ("https://shop.example/", html_text))
+
+    assert research_engine.fetch_og_image_url("https://shop.example/") == expected
+
+
+def test_og_image_pointing_at_an_internal_address_is_rejected(monkeypatch):
+    """LLM 応答に限らず、外部ページが宣言した画像URLも untrusted として検証する
+
+    ページ自体の URL 検証は通し、og:image 側の検証だけを見る。
+    入口で弾かれて通ってしまう (= 検証に到達しない) と偽の緑になるため、
+    is_public_http_url は「内部アドレスだけ拒否する」stub に差し替える。
+    """
+    monkeypatch.setattr(
+        research_engine,
+        "is_public_http_url",
+        lambda url: url.startswith("http") and "169.254.169.254" not in url,
+    )
+    monkeypatch.setattr(
+        research_engine,
+        "_fetch_html_head",
+        lambda url: ("https://shop.example/", '<meta property="og:image" content="http://169.254.169.254/latest/">'),
+    )
+    assert research_engine.fetch_og_image_url("https://shop.example/") is None
+
+
+def test_og_fetch_is_skipped_for_urls_we_must_not_open(monkeypatch):
+    def _must_not_be_called(*a, **k):
+        raise AssertionError("許可しないURLなのにページ取得が走った")
+
+    monkeypatch.setattr(research_engine, "_fetch_html_head", _must_not_be_called)
+
+    assert research_engine.fetch_og_image_url("") is None
+    assert research_engine.fetch_og_image_url("file:///etc/passwd") is None
+    assert research_engine.fetch_og_image_url("http://127.0.0.1/") is None
