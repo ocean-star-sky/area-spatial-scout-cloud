@@ -10,9 +10,11 @@ Google Gemini API (Google Search Grounding) でエリア×テーマのスポッ�
   作って返すことは行わない (調査レポートとしての信頼性を優先する)。
 """
 
+import ipaddress
 import json
 import os
 import re
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,11 +41,49 @@ class ResearchUnavailable(RuntimeError):
         self.reasons = reasons or []
 
 
+def is_public_http_url(url: str) -> bool:
+    """外部から取得してよい URL か判定する。
+
+    画像 URL は LLM 応答（=外部 Web の影響下にある untrusted 入力）なので、
+    そのまま取得するとサーバ内部やクラウドのメタデータサーバへ要求を出せてしまう。
+    http/https 以外と、名前解決先が内部アドレスになるホストを拒否する。
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except (socket.gaierror, UnicodeError, ValueError):
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            return False
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return False
+    return bool(infos)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """リダイレクト先で内部アドレスへ飛ばされるのを防ぐため、転送自体を許可しない"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def download_and_crop_image(url: str, output_path: Path, target_w: int = 1200, target_h: int = 800) -> bool:
     """Webから画像をダウンロードし、指定アスペクト比で高品質リサイズ"""
+    if not is_public_http_url(url):
+        print(f"[Warning] 取得を許可しないURLのためスキップ: {url[:80]}")
+        return False
+    opener = urllib.request.build_opener(_NoRedirect)
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
     try:
-        with urllib.request.urlopen(req, timeout=5) as res:
+        with opener.open(req, timeout=5) as res:
             with open(output_path, "wb") as f:
                 f.write(res.read())
 
@@ -163,7 +203,8 @@ Google 検索を必ず使い、エリア「{area}」における「{theme}」の
 3. クチコミ (reviews) には、検索結果に実際に存在した利用者の声の要約のみを入れること。
    実在のクチコミが見つからない場合は空配列 [] にすること。
 4. テーマが「個室」「接待」を含む場合は、個室の有無を検索で確認できた施設を優先すること。
-5. 住所は国土地理院でジオコーディングできる正式表記 (東京都…丁目…番…) にすること。
+5. 住所は地図生成に使うため、検索で確認できた施設は必ず正式表記 (東京都…丁目…番…) で
+   記載すること。ただし確認できない場合に住所を創作してはならない (空文字のままにする)。
 6. 出力は ```json ... ``` のコードブロック内に、下記スキーマのJSONのみ。前置き・解説は不要。
 
 【出力JSONスキーマ】
@@ -254,15 +295,27 @@ def filter_by_genre(spots: list[dict], theme: str) -> list[dict]:
     return kept
 
 
+def safe_spot_slug(raw, fallback: str) -> str:
+    """LLM が返した id をファイル名に使えるスラグへ正規化する。
+
+    id は LLM 応答そのもの (= untrusted) なので、そのままパスへ連結すると
+    出力ディレクトリの外にファイルを書けてしまう。
+    """
+    slug = re.sub(r"[^A-Za-z0-9_-]", "", str(raw or ""))[:40]
+    return slug or fallback
+
+
 def attach_photos(data: dict, output_dir: Path) -> int:
     """調査結果が示した実在画像URLのみを取得して添付する。取得できなければ写真なし。"""
+    output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     attached = 0
     for i, s in enumerate(data.get("spots", [])):
         urls = [u for u in (s.get("photo_urls") or []) if isinstance(u, str) and u.startswith("http")]
         photos = []
+        slug = safe_spot_slug(s.get("id"), f"spot_{i + 1}")
         for p_idx, url in enumerate(urls[:PHOTOS_PER_SPOT]):
-            target = output_dir / f"{s.get('id', f'spot_{i + 1}')}_photo_{p_idx + 1}.jpg"
+            target = output_dir / f"{slug}_photo_{p_idx + 1}.jpg"
             if download_and_crop_image(url, target):
                 host = urllib.parse.urlparse(url).netloc
                 photos.append(

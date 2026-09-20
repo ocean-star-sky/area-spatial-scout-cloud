@@ -18,7 +18,6 @@ from report_engine import as_int, generate_full_report_pack
 def _no_network(monkeypatch):
     """地図タイル取得と住所ジオコーディングを止め、テストを外部依存なしにする"""
     monkeypatch.setattr(report_engine, "geocode_address", lambda _addr: None)
-    monkeypatch.setattr(report_engine, "_fetch_gsi_tile_safe", lambda *a, **k: None, raising=False)
 
     def _no_tiles(*args, **kwargs):
         raise OSError("network disabled in tests")
@@ -42,11 +41,58 @@ def test_string_reviews_count_does_not_crash(tmp_path):
     assert pack["docx_path"].exists()
 
 
-def test_generates_every_artifact(tmp_path):
+def test_generates_every_artifact(tmp_path, monkeypatch):
+    """住所を解決できる場合は地図を含む全成果物が揃うこと"""
+    monkeypatch.setattr(report_engine, "geocode_address", lambda _addr: (35.6719, 139.7648))
     pack = generate_full_report_pack(copy.deepcopy(SAMPLE_DATA), tmp_path)
     for key in ("docx_path", "mobile_docx_path", "csv_path", "map_path"):
         assert pack[key] is not None and pack[key].exists(), f"{key} が生成されていない"
     assert len(list(tmp_path.glob("*.docx"))) == 2, "互換用の重複 docx が復活している"
+
+
+def test_unresolvable_addresses_are_not_given_invented_coordinates(tmp_path):
+    """ジオコーディングできないスポットに『それらしい座標』を与えて地図に載せないこと。
+
+    修正前は黄金角の散布で架空の緯度経度を作り、実在店名を実在しない位置に
+    『出典: 国土地理院標準地図』付きで描いていた。
+    """
+    data = copy.deepcopy(SAMPLE_DATA)
+    pack = generate_full_report_pack(data, tmp_path)
+    assert pack["map_path"] is None, "座標不明なのに地図を作っている"
+    for s in data["spots"]:
+        assert "lat" not in s and "lon" not in s, f"{s['name']} に架空座標が付与された"
+        assert s.get("geocoded") is False
+
+
+def test_map_includes_only_geocoded_spots(tmp_path, monkeypatch):
+    """一部だけ解決できた場合、解決できた分だけが地図に載ること"""
+    resolved = {"東京都中央区銀座1-1-1": (35.6719, 139.7648)}
+    monkeypatch.setattr(report_engine, "geocode_address", lambda addr: resolved.get(addr))
+    data = copy.deepcopy(SAMPLE_DATA)
+    pack = generate_full_report_pack(data, tmp_path)
+    assert pack["map_path"] is not None
+    assert [s.get("geocoded") for s in data["spots"]] == [True, False]
+
+
+@pytest.mark.parametrize(
+    ("raw", "must_not_contain"),
+    [("../../pwned", ".."), ("a/b", "/"), ("x\\y", "\\"), ("con:1", ":")],
+)
+def test_filename_component_is_sanitised(raw, must_not_contain):
+    assert must_not_contain not in report_engine.safe_filename_component(raw)
+
+
+def test_area_theme_cannot_escape_output_dir(tmp_path):
+    """area/theme をファイル名に直結して出力先の外へ書けないこと (書き込み側の traversal)"""
+    job = tmp_path / "job"
+    job.mkdir()
+    data = copy.deepcopy(SAMPLE_DATA)
+    data["meta"]["area"] = "../../pwned"
+    data["meta"]["theme"] = "../evil"
+    pack = generate_full_report_pack(data, job)
+    for key in ("docx_path", "mobile_docx_path", "csv_path"):
+        assert pack[key].resolve().parent == job.resolve(), f"{key} が job_dir の外に出た"
+    assert not list(tmp_path.glob("*pwned*")), "job_dir の外にファイルが生成された"
 
 
 def test_spots_without_photos_render_cleanly(tmp_path):

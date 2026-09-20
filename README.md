@@ -20,6 +20,8 @@ PC 印刷用 Word・スマホ閲覧用 Word・CSV 台帳・一括 ZIP を生成�
 4. **デュアル Word** — PC 印刷用 A4（全 12pt 以上）と、スマホ用の横スクロールゼロ 1 カラム版を
    同時に生成します。
 5. **重なりを避ける広域地図** — 国土地理院標準地図タイル上にピンとラベルを自動配置します。
+   **住所をジオコーディングできたスポットだけ**を掲載し、解決できなければ地図に載せません
+   （実在する店名を実在しない位置に描かないため）。解決できたものが 0 件なら地図自体を作りません。
 
 ### 制限事項
 
@@ -113,6 +115,7 @@ DRIVE_PARENT_FOLDER_ID=<フォルダID> python3 drive_uploader.py
 |---|---|---|
 | `GEMINI_API_KEY` | ✅ | Gemini API キー（Secret Manager 経由で注入） |
 | `SCOUT_PASSWORD` | ✅ | アクセスキー。未設定時は全 API を 503 で拒否 |
+| `SCOUT_TOKEN_SECRET` | 推奨 | ダウンロードURLの署名鍵。アクセスキーとは別の秘密にする（`deploy.sh` が自動生成）。未設定時はアクセスキーから派生するが、URL が漏れた際にアクセスキー推測の手掛かりになる |
 | `DRIVE_PARENT_FOLDER_ID` | － | 共有ドライブ内の納品先フォルダ ID。未設定ならドライブ納品を行わない |
 | `SCOUT_DEBUG_ENABLED` | － | `1` のとき診断 API `/api/scout/debug` を有効化（Gemini を消費します） |
 
@@ -122,11 +125,12 @@ DRIVE_PARENT_FOLDER_ID=<フォルダID> python3 drive_uploader.py
 |---|---|---|---|
 | `GET` | `/health` | 不要 | ヘルスチェック |
 | `POST` | `/api/scout/instant` | アクセスキー | 調査 → 成果物生成 → ドライブ納品 |
-| `GET` | `/api/scout/jobs` | アクセスキー | 直近ジョブ一覧 |
+| `GET` | `/api/scout/jobs` | `X-Scout-Key` ヘッダ | 直近ジョブ一覧 |
 | `GET` | `/api/download/{job_id}/{type}` | ジョブ別トークン | 成果物の配信 |
 
 `type` は `map` / `mobile_docx` / `pc_docx` / `csv` / `zip`。
-ダウンロード URL は `/api/scout/instant` のレスポンスに署名付きで含まれます。
+ダウンロード URL は `/api/scout/instant` のレスポンスに署名付き (`?t=...`) で含まれます。
+管理系 GET はアクセスキーをクエリ文字列では受け付けません（アクセスログに平文で残るため）。
 
 ---
 
@@ -136,12 +140,19 @@ DRIVE_PARENT_FOLDER_ID=<フォルダID> python3 drive_uploader.py
 pip install -r requirements-dev.txt
 ruff check .
 pytest -q
+
+# 回帰テストが本当に効いているかを変異テストで実証する
+python3 tools/mutation_check.py
 ```
 
 テストはネットワークにも Gemini API にもアクセスしません。
 `tests/test_security.py` と `tests/test_deploy_hygiene.py` は、過去に実機で再現した
 不具合（パストラバーサル・認証欠落・古いソースを埋め込んだデプロイスクリプト）を
 そのまま固定しています。
+
+`tools/mutation_check.py` は各ガードを 1 つずつ「壊れていた頃の状態」へ戻し、
+対応するテストが赤くなることを確認します（ALL PASS で満足せず、素通りテストを検出するため）。
+リポジトリ本体は書き換えず、毎回一時ディレクトリへコピーして実行します。
 
 ローカル起動:
 
@@ -159,6 +170,7 @@ area-spatial-scout-cloud/
   ├── drive_uploader.py      # 共有ドライブへの納品
   ├── templates/index.html   # スマホ向け Web UI
   ├── tests/                 # 回帰テスト
+  ├── tools/mutation_check.py # 回帰テストの有効性を検証する変異テスト
   ├── Dockerfile             # 日本語フォント入りコンテナ定義
   ├── deploy.sh              # Cloud Run デプロイスクリプト
   └── requirements.txt

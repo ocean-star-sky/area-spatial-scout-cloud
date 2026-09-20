@@ -73,6 +73,23 @@ def as_int(val, default: int = 0) -> int:
     return int(digits) if digits else default
 
 
+_UNSAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def safe_filename_component(val, default: str = "未指定", max_len: int = 60) -> str:
+    """ファイル名に埋め込める安全な断片へ正規化する。
+
+    area / theme は利用者入力と LLM 応答の両方から来るため、そのまま f-string で
+    ファイル名に入れると `../..` で出力ディレクトリの外にファイルを作れてしまう
+    (読み出し側だけ固めても、書き込み側が素通りでは意味がない)。
+    """
+    text = safe_nfc(val).strip()
+    text = _UNSAFE_FILENAME_RE.sub("_", text)
+    text = text.replace(os.sep, "_")
+    text = re.sub(r"\.{2,}", "_", text).strip(". 　")
+    return text[:max_len] or default
+
+
 def make_google_maps_url(name: str, address: str) -> str:
     """施設名と住所からGoogleマップの検索URLを生成"""
     query = f"{name} {address}".strip()
@@ -207,72 +224,6 @@ def add_callout_box(doc, text: str, title: str = None, border_color_hex=COLOR_PR
     p_after.paragraph_format.space_after = Pt(1)
 
 
-# 日本全国主要ビジネス・商業エリア代表座標マスター (外部API通信0秒化)
-AREA_COORDINATES = {
-    "銀座": (35.6719, 139.7648),
-    "新橋": (35.6663, 139.7583),
-    "汐留": (35.6636, 139.7600),
-    "有楽町": (35.6750, 139.7630),
-    "日比谷": (35.6740, 139.7595),
-    "築地": (35.6655, 139.7707),
-    "渋谷": (35.6580, 139.7016),
-    "原宿": (35.6702, 139.7027),
-    "表参道": (35.6652, 139.7123),
-    "青山": (35.6652, 139.7180),
-    "新宿": (35.6909, 139.7003),
-    "西新宿": (35.6912, 139.6920),
-    "歌舞伎町": (35.6948, 139.7029),
-    "有明": (35.6318, 139.7942),
-    "豊洲": (35.6548, 139.7963),
-    "お台場": (35.6298, 139.7753),
-    "台場": (35.6298, 139.7753),
-    "東京": (35.6812, 139.7671),
-    "丸の内": (35.6815, 139.7640),
-    "大手町": (35.6865, 139.7645),
-    "日本橋": (35.6840, 139.7745),
-    "八重洲": (35.6800, 139.7710),
-    "六本木": (35.6628, 139.7314),
-    "赤坂": (35.6720, 139.7360),
-    "麻布": (35.6547, 139.7371),
-    "麻布十番": (35.6547, 139.7371),
-    "虎ノ門": (35.6690, 139.7490),
-    "恵比寿": (35.6467, 139.7101),
-    "目黒": (35.6339, 139.7158),
-    "代官山": (35.6490, 139.7035),
-    "中目黒": (35.6443, 139.6987),
-    "品川": (35.6284, 139.7387),
-    "五反田": (35.6264, 139.7234),
-    "大崎": (35.6197, 139.7282),
-    "秋葉原": (35.6983, 139.7730),
-    "神田": (35.6918, 139.7709),
-    "上野": (35.7141, 139.7741),
-    "浅草": (35.7126, 139.7966),
-    "池袋": (35.7295, 139.7109),
-    "中野": (35.7058, 139.6658),
-    "吉祥寺": (35.7031, 139.5798),
-    "立川": (35.6980, 139.4137),
-    "町田": (35.5420, 139.4460),
-    "横浜": (35.4658, 139.6227),
-    "みなとみらい": (35.4560, 139.6320),
-    "川崎": (35.5312, 139.6969),
-    "大宮": (35.9063, 139.6240),
-    "幕張": (35.6480, 140.0416),
-    "千葉": (35.6074, 140.1065),
-    "名古屋": (35.1709, 136.8815),
-    "栄": (35.1681, 136.9066),
-    "大阪": (34.7024, 135.4959),
-    "梅田": (34.7024, 135.4959),
-    "難波": (34.6669, 135.5003),
-    "心斎橋": (34.6751, 135.5005),
-    "京都": (34.9858, 135.7588),
-    "神戸": (34.6946, 135.1955),
-    "福岡": (33.5902, 130.4017),
-    "博多": (33.5902, 130.4207),
-    "天神": (33.5916, 130.3989),
-    "札幌": (43.0686, 141.3508)
-}
-
-
 def geocode_address(address: str) -> tuple[float, float] | None:
     """国土地理院APIを用いて住所から緯度経度を取得 (タイムアウト1秒・非同期/フェイルセーフ)"""
     if not address:
@@ -299,57 +250,38 @@ def deg2num(lat_deg, lon_deg, zoom):
 
 
 def generate_spots_map_image(spots: list[dict], output_path: Path, area: str = "エリア", theme: str = "テーマ") -> Path | None:
-    """全スポットを国土地理院タイル上にプロットした高精細俯瞰図を自動生成（スマート衝突回避＆2秒確約並列取得）"""
-    resolved_spots = []
-    
-    # 1. エリア代表座標の高速マッチング (通信0秒)
-    base_coord = None
-    for k, v in AREA_COORDINATES.items():
-        if k in area:
-            base_coord = v
-            break
-    if not base_coord:
-        base_coord = (35.6812, 139.7671)  # デフォルト（東京）
+    """住所を実際にジオコーディングできたスポットだけを国土地理院タイル上にプロットする。
 
-    # 2. 各スポットの座標解決（国土地理院API → マスター座標散布のカスケード）
+    重要: 解決できなかったスポットに「それらしい座標」を与えて地図に載せてはいけない。
+    実在の店名が、実在しない位置に、公的地図の出典表記付きで描かれることになる。
+    解決できたものが 1 件も無ければ地図自体を作らない (None を返す)。
+    """
+    resolved_spots = []
+
     for idx, s in enumerate(spots):
         lat = s.get("lat")
         lon = s.get("lon")
-        
-        # 既存座標がない場合、住所 → エリア辞書 → デフォルト の順で座標を付与
+
         if lat is None or lon is None:
             addr = s.get("address", "")
-            
-            # 第1候補: 国土地理院APIで正確な住所ジオコーディング（実在住所なら精度◎）
             geo = geocode_address(addr) if addr else None
-            if geo:
-                lat, lon = geo
-                # 同一住所の微小散布（ピン重なり防止）
-                angle = (idx * 137.5) * (math.pi / 180.0)
-                lat += 0.0003 * math.sin(angle)
-                lon += 0.0004 * math.cos(angle)
-            else:
-                # 第2候補: エリア辞書マッチ
-                spot_base = None
-                for k, v in AREA_COORDINATES.items():
-                    if k in addr:
-                        spot_base = v
-                        break
-                if not spot_base:
-                    spot_base = base_coord
-                
-                # 周辺への自然な幾何学的散布（同心・多角形オフセット: 約300m〜2km）
-                angle = (idx * 137.5) * (math.pi / 180.0)  # 黄金比アングル
-                # radius grows with idx to ensure distinct pins (0.003° ≈ 300 m)
-                radius = 0.003 + idx * 0.0015
-                lat = spot_base[0] + radius * math.sin(angle)
-                lon = spot_base[1] + (radius * 1.25) * math.cos(angle)
+            if not geo:
+                s["geocoded"] = False
+                print(f"[Map] 住所を解決できないため地図から除外: {s.get('name', '?')} ({addr or '住所なし'})")
+                continue
+            lat, lon = geo
+            # 同一住所に複数店が入る場合のピン重なりだけを避ける微小オフセット (約30m)
+            angle = (idx * 137.5) * (math.pi / 180.0)
+            lat += 0.0003 * math.sin(angle)
+            lon += 0.0004 * math.cos(angle)
             s["lat"], s["lon"] = lat, lon
-            
-        name = safe_nfc(s.get("name", f"スポット {idx+1}"))
+
+        s["geocoded"] = True
+        name = safe_nfc(s.get("name", f"スポット {idx + 1}"))
         resolved_spots.append((idx + 1, name, float(lat), float(lon)))
 
     if not resolved_spots:
+        print("[Map] 座標を確認できたスポットが無いため地図を生成しません")
         return None
 
     lats = [s[2] for s in resolved_spots]
@@ -709,6 +641,16 @@ def create_docx_report(data: dict, output_path: Path, map_image_path: Path = Non
         add_callout_box(doc, "\n".join([safe_nfc(f) for f in findings_list]), title="【主要ファインディングス】")
 
     has_map = bool(map_image_path and os.path.exists(map_image_path))
+    if not has_map:
+        # 地図を出せない理由を黙って伏せない (章が消えるだけだと理由が伝わらない)
+        unmapped = [s for s in spots if not s.get("geocoded")]
+        if unmapped:
+            add_callout_box(
+                doc,
+                f"掲載 {len(spots)} 件のうち {len(unmapped)} 件は住所を確認できなかったため、"
+                "位置関係マップは作成していません（推定位置で地図に描くことはしません）。",
+                title="【広域俯瞰図について】",
+            )
     if has_map:
         doc.add_page_break()
         h_map = doc.add_paragraph()
@@ -922,6 +864,16 @@ def create_docx_report_mobile(data: dict, output_path: Path, map_image_path: Pat
         add_callout_box(doc, "\n".join([safe_nfc(f) for f in findings_list]), title="【キー・ファインディングス】")
 
     has_map = bool(map_image_path and os.path.exists(map_image_path))
+    if not has_map:
+        # 地図を出せない理由を黙って伏せない (章が消えるだけだと理由が伝わらない)
+        unmapped = [s for s in spots if not s.get("geocoded")]
+        if unmapped:
+            add_callout_box(
+                doc,
+                f"掲載 {len(spots)} 件のうち {len(unmapped)} 件は住所を確認できなかったため、"
+                "位置関係マップは作成していません（推定位置で地図に描くことはしません）。",
+                title="【広域俯瞰図について】",
+            )
     if has_map:
         doc.add_page_break()
         h_map = doc.add_paragraph()
@@ -1050,22 +1002,27 @@ def generate_full_report_pack(data: dict, output_dir: Path) -> dict:
     spots = data.get("spots", [])
     spots_count = len(spots)
 
+    # ファイル名に使う断片は必ずサニタイズする (本文表示には元の値を使う)
+    area_fn = safe_filename_component(area, default="エリア")
+    theme_fn = safe_filename_component(theme, default="テーマ")
     date_str = re.sub(r"[^0-9]", "", str(scouted_at))[:8] if scouted_at else datetime.now().strftime("%Y%m%d")
     count_str = f"_Top{spots_count}" if spots_count > 0 else ""
 
     # 1. 地図画像
-    map_path = output_dir / f"{area}_{theme}_plot_map.png"
+    map_path = output_dir / f"{area_fn}_{theme_fn}_plot_map.png"
     try:
-        generate_spots_map_image(spots, map_path, area=area, theme=theme)
+        # 戻り値を必ず受ける。座標を確認できたスポットが無い場合は None が返るため、
+        # ここで無視すると「存在しないファイルのパス」を成果物として返してしまう。
+        map_path = generate_spots_map_image(spots, map_path, area=area, theme=theme)
     except Exception as e:
         print(f"[Warning] 地図生成スキップ: {e}", file=sys.stderr)
         map_path = None
 
     # 2. ファイル名
-    docx_name = f"【{area}】{theme}{count_str}比較調査レポート_{date_str}.docx"
-    mobile_docx_name = f"【{area}】{theme}{count_str}比較調査レポート_スマホ閲覧用_{date_str}.docx"
-    csv_name = f"【{area}】{theme}{count_str}スポット台帳_{date_str}.csv"
-    folder_name = f"{date_str}_【{area}】{theme}{count_str}比較調査レポート"
+    docx_name = f"【{area_fn}】{theme_fn}{count_str}比較調査レポート_{date_str}.docx"
+    mobile_docx_name = f"【{area_fn}】{theme_fn}{count_str}比較調査レポート_スマホ閲覧用_{date_str}.docx"
+    csv_name = f"【{area_fn}】{theme_fn}{count_str}スポット台帳_{date_str}.csv"
+    folder_name = f"{date_str}_【{area_fn}】{theme_fn}{count_str}比較調査レポート"
 
     docx_path = output_dir / docx_name
     mobile_docx_path = output_dir / mobile_docx_name

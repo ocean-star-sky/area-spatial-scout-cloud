@@ -7,6 +7,7 @@
 
 import io
 import json
+import pathlib
 import urllib.error
 
 import pytest
@@ -137,3 +138,64 @@ def test_extract_json_repairs_truncated_output():
 def test_extract_json_raises_on_garbage():
     with pytest.raises(ValueError):
         extract_json_from_text("これはJSONではありません")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://169.254.169.254/computeMetadata/v1/",  # クラウドのメタデータサーバ
+        "http://127.0.0.1:8080/admin",
+        "http://localhost/secret.jpg",
+        "http://10.0.0.5/a.jpg",
+        "file:///etc/passwd",
+        "ftp://example.com/a.jpg",
+        "http://[::1]/a.jpg",
+    ],
+)
+def test_internal_and_non_http_urls_are_refused(url, tmp_path, monkeypatch):
+    """LLM が返した URL をそのまま取りに行かないこと (SSRF)。
+
+    戻り値が False であることだけを見ても検証にならない。ガードを外しても
+    「接続できずに False」で同じ結果になるため、*要求を出していないこと* を確かめる。
+    """
+    attempted = []
+
+    def _tripwire(*_args, **_kwargs):
+        attempted.append(_args)
+        raise AssertionError(f"ブロックすべき URL に要求を出した: {url}")
+
+    monkeypatch.setattr(research_engine.urllib.request, "build_opener", _tripwire)
+
+    assert research_engine.is_public_http_url(url) is False
+    assert research_engine.download_and_crop_image(url, tmp_path / "x.jpg") is False
+    assert attempted == [], f"ブロックすべき URL で opener を組み立てた: {url}"
+    assert not (tmp_path / "x.jpg").exists()
+
+
+def test_public_url_passes_the_filter():
+    assert research_engine.is_public_http_url("https://example.com/a.jpg") is True
+
+
+def test_redirects_are_not_followed():
+    """リダイレクトで内部アドレスへ飛ばされる経路を塞いでいること"""
+    assert research_engine._NoRedirect().redirect_request(None, None, 302, "", {}, "http://127.0.0.1/") is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [("spot_1", "spot_1"), ("../../evil", "evil"), ("a/b", "ab"), ("", "fallback"), (None, "fallback")],
+)
+def test_spot_id_is_sanitised_for_filenames(raw, expected):
+    assert research_engine.safe_spot_slug(raw, "fallback") == expected
+
+
+def test_llm_supplied_id_cannot_escape_output_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        research_engine, "download_and_crop_image", lambda url, path, **k: path.write_bytes(b"x") or True
+    )
+    job = tmp_path / "job"
+    job.mkdir()
+    data = {"spots": [{"id": "../../pwned", "name": "n", "photo_urls": ["https://example.com/a.jpg"]}]}
+    research_engine.attach_photos(data, job)
+    written = pathlib.Path(data["spots"][0]["photos"][0]["path"]).resolve()
+    assert written.parent == job.resolve(), "LLM の id でディレクトリを脱出した"

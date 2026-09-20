@@ -1,0 +1,16 @@
+.git
+.github
+.gitignore
+.dockerignore
+.gcloudignore
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+tests/
+# ローカル検証で置いた認証情報をイメージへ焼かない
+service_account.json
+*.json.key
+.env
+.venv/
+outputs/

@@ -272,7 +272,10 @@
           resultCard.classList.remove('hidden');
 
           document.getElementById('resultTitle').innerText = `【${area}】${theme} Top${data.spots_count || count} レポート完成！`;
-          document.getElementById('mapImg').src = data.map_url;
+          // 住所を確認できたスポットが無い場合は地図を作らないため、枠ごと隠す
+          const hasMap = data.mapped_count === undefined || data.mapped_count > 0;
+          document.getElementById('mapContainer').classList.toggle('hidden', !hasMap);
+          if (hasMap) document.getElementById('mapImg').src = data.map_url;
           document.getElementById('mobileDocxLink').href = data.mobile_docx_url;
           document.getElementById('pcDocxLink').href = data.pc_docx_url;
           document.getElementById('zipLink').href = data.zip_url;
@@ -292,6 +295,9 @@
           const meta = [];
           if (data.spots_count < data.requested_count) {
             meta.push(`検索で確認できたのは ${data.spots_count} 件でした（要求 ${data.requested_count} 件）`);
+          }
+          if (typeof data.mapped_count === 'number' && data.mapped_count < data.spots_count) {
+            meta.push(`住所を確認できたのは ${data.mapped_count}/${data.spots_count} 件（地図はこの分のみ）`);
           }
           if (data.sources_count) meta.push(`参照した出典 ${data.sources_count} 件をレポート巻末に記載`);
           if (data.elapsed_seconds) meta.push(`所要 ${data.elapsed_seconds} 秒`);

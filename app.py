@@ -26,7 +26,7 @@ from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
@@ -51,6 +51,11 @@ BASE_DIR = Path(__file__).resolve().parent
 
 # アクセスキー。未設定の場合は全 API を拒否する (fail-closed)。
 SCOUT_PASSWORD = os.environ.get("SCOUT_PASSWORD", "")
+
+# ダウンロードトークンの署名鍵。アクセスキーとは別の秘密にする。
+# 同じ鍵を使うと、URL に載るトークンとジョブIDの組から
+# アクセスキー自体をオフラインで総当たりできる検証オラクルになるため。
+SCOUT_TOKEN_SECRET = os.environ.get("SCOUT_TOKEN_SECRET", "")
 
 # 診断エンドポイントは明示的に有効化したときのみ公開 (Gemini 課金を焼くため)
 SCOUT_DEBUG_ENABLED = os.environ.get("SCOUT_DEBUG_ENABLED", "") == "1"
@@ -80,14 +85,25 @@ def require_auth(password: str = "") -> None:
         raise HTTPException(status_code=401, detail="アクセスキー（パスワード）が正しくありません")
 
 
-def require_auth_query(password: str = Query("")) -> None:
-    """クエリパラメータ経由の認証 (GET 用)"""
-    require_auth(password)
+def require_auth_header(x_scout_key: str = Header("")) -> None:
+    """ヘッダ経由の認証 (GET 用)。
+
+    クエリ文字列に載せるとアクセスログ (Cloud Logging の httpRequest.requestUrl) に
+    平文で残るため、管理系 GET はヘッダのみ受け付ける。
+    """
+    require_auth(x_scout_key)
+
+
+def _token_key() -> bytes:
+    """トークン署名鍵。未設定時はアクセスキーから派生するが、用途を分離する。"""
+    if SCOUT_TOKEN_SECRET:
+        return SCOUT_TOKEN_SECRET.encode("utf-8")
+    return sha256(b"area-spatial-scout/download-token/v1|" + SCOUT_PASSWORD.encode("utf-8")).digest()
 
 
 def download_token(job_id: str) -> str:
     """ジョブ単位のダウンロード用トークン。リンクを踏むだけで開けるが推測はできない。"""
-    return hmac.new(SCOUT_PASSWORD.encode("utf-8"), job_id.encode("utf-8"), sha256).hexdigest()[:32]
+    return hmac.new(_token_key(), job_id.encode("utf-8"), sha256).hexdigest()[:32]
 
 
 def resolve_job_dir(job_id: str) -> Path:
@@ -135,7 +151,10 @@ def create_report_zip(job_dir: Path, folder_name: str) -> Path:
 def cleanup_old_jobs(max_keep: int = 10) -> None:
     """古いジョブディレクトリを削除してディスクを解放"""
     try:
-        jobs = sorted(OUTPUTS_DIR.glob("*"), key=lambda p: p.stat().st_mtime)
+        # ディレクトリだけを対象にする。OUTPUTS_DIR 直下には ZIP 生成中の
+        # 一時ファイルも置かれるため、glob("*") をそのまま消すと
+        # 並行実行中の別ジョブの成果物を壊しうる。
+        jobs = sorted((p for p in OUTPUTS_DIR.iterdir() if p.is_dir()), key=lambda p: p.stat().st_mtime)
         for old_job in jobs[:-max_keep]:
             shutil.rmtree(old_job, ignore_errors=True)
     except Exception as e:
@@ -237,6 +256,7 @@ def scout_instant_endpoint(req: ScoutRequest):
         "spots_count": len(data.get("spots", [])),
         "requested_count": count,
         "sources_count": len(data.get("meta", {}).get("sources", [])),
+        "mapped_count": sum(1 for s in data.get("spots", []) if s.get("geocoded")),
         "elapsed_seconds": round(elapsed, 2),
         "map_url": f"/api/download/{job_id}/map?t={token}",
         "mobile_docx_url": f"/api/download/{job_id}/mobile_docx?t={token}",
@@ -248,7 +268,7 @@ def scout_instant_endpoint(req: ScoutRequest):
     return JSONResponse(result)
 
 
-@app.get("/api/scout/jobs", dependencies=[Depends(require_auth_query)])
+@app.get("/api/scout/jobs", dependencies=[Depends(require_auth_header)])
 def list_scout_jobs():
     """管理・監視用: 直近ジョブの一覧 (要アクセスキー)"""
     return JSONResponse(dict(JOBS))
@@ -259,9 +279,11 @@ async def download_file(job_id: str, file_type: str, t: str = Query("")):
     """成果物の配信。job_id 単位の署名付きトークンを必須とする。"""
     if not SCOUT_PASSWORD:
         raise HTTPException(status_code=503, detail="SCOUT_PASSWORD が未設定のためサービスを提供できません")
-    job_dir = resolve_job_dir(job_id)
+    # トークン検証を先に行う。ディレクトリ解決を先にすると、404 と 403 の差で
+    # 「そのジョブが存在するか」を未認証で言い当てられてしまう。
     if not t or not secrets.compare_digest(t, download_token(job_id)):
         raise HTTPException(status_code=403, detail="このファイルへのアクセス権がありません")
+    job_dir = resolve_job_dir(job_id)
 
     docx_mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     if file_type == "map":
@@ -287,7 +309,7 @@ async def download_file(job_id: str, file_type: str, t: str = Query("")):
 
 if SCOUT_DEBUG_ENABLED:
 
-    @app.get("/api/scout/debug", dependencies=[Depends(require_auth_query)])
+    @app.get("/api/scout/debug", dependencies=[Depends(require_auth_header)])
     def scout_debug_endpoint(area: str = "銀座", theme: str = "鮨"):
         """各処理フェーズの所要時間を計測する診断用 (SCOUT_DEBUG_ENABLED=1 のときのみ)"""
         import time

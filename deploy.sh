@@ -13,6 +13,7 @@ REGION="${REGION:-asia-northeast1}"
 SA_NAME="${SA_NAME:-area-spatial-scout}"
 GEMINI_SECRET="${GEMINI_SECRET:-gemini-api-key}"
 PASSWORD_SECRET="${PASSWORD_SECRET:-scout-password}"
+TOKEN_SECRET="${TOKEN_SECRET:-scout-token-secret}"
 
 echo "=========================================================="
 echo "🚀 Area Spatial Scout: Cloud Run へのデプロイを開始します"
@@ -85,6 +86,13 @@ if [ -z "${SCOUT_PASSWORD:-}" ] && ! gcloud secrets describe "$PASSWORD_SECRET" 
 fi
 ensure_secret "$PASSWORD_SECRET" "${SCOUT_PASSWORD:-}"
 
+# ダウンロードトークンの署名鍵: アクセスキーとは別の秘密を必ず持たせる
+if [ -z "${SCOUT_TOKEN_SECRET:-}" ] && ! gcloud secrets describe "$TOKEN_SECRET" --project="$PROJECT_ID" &>/dev/null; then
+    SCOUT_TOKEN_SECRET=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))")
+    echo "🔐 ダウンロードトークン署名鍵を自動生成しました（表示しません）"
+fi
+ensure_secret "$TOKEN_SECRET" "${SCOUT_TOKEN_SECRET:-}"
+
 # ---------------------------------------------------------------- 納品先
 DRIVE_PARENT_FOLDER_ID="${DRIVE_PARENT_FOLDER_ID:-}"
 if [ -z "$DRIVE_PARENT_FOLDER_ID" ]; then
@@ -111,7 +119,7 @@ gcloud run deploy "$SERVICE_NAME" \
     --min-instances 0 \
     --max-instances 10 \
     --concurrency 20 \
-    --set-secrets "GEMINI_API_KEY=${GEMINI_SECRET}:latest,SCOUT_PASSWORD=${PASSWORD_SECRET}:latest" \
+    --set-secrets "GEMINI_API_KEY=${GEMINI_SECRET}:latest,SCOUT_PASSWORD=${PASSWORD_SECRET}:latest,SCOUT_TOKEN_SECRET=${TOKEN_SECRET}:latest" \
     --set-env-vars "DRIVE_PARENT_FOLDER_ID=${DRIVE_PARENT_FOLDER_ID}" \
     --project "$PROJECT_ID"
 
