@@ -160,7 +160,10 @@ MUTATIONS = [
         "自己展開デプロイスクリプトを復活",
         "__NEW_FILE__:update_and_deploy.sh",
         "",
-        "#!/bin/bash\nb64 = 'H4sI" + "A" * 220 + "'\nt.extractall('.')\n",
+        # 検出対象の文字列を分割して組み立てる。このファイル自身も
+        # tests/test_deploy_hygiene.py の走査対象なので、リテラルで書くと
+        # 「ハーネスが自分の検査に引っかかる」だけで実態の検出にならない。
+        "#!/bin/bash\nb64 = '" + "H4s" + "I" + "A" * 220 + "'\nt." + "extract" + "all('.')\n",
         "tests/test_deploy_hygiene.py",
     ),
 ]
