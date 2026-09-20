@@ -57,6 +57,11 @@ REVIEW_BACKFILL_MAX = int(os.environ.get("REVIEW_BACKFILL_MAX", "20"))
 OG_FETCH_TIMEOUT = 5.0
 OG_HTML_MAX_BYTES = 512 * 1024
 
+# JSON として読めない応答が返ったモデルを再試行する回数 (調査 1 回あたりの合計)。
+# 実測 (9/20 18:14 阿佐ヶ谷): 検索は成立していたのに '{' を含まない散文が返り、
+# 同じ条件の再実行では正常な JSON が返った = 間欠的。無料枠を食い潰さないよう 1 回。
+PARSE_RETRY_BUDGET = int(os.environ.get("PARSE_RETRY_BUDGET", "1"))
+
 
 class ResearchUnavailable(RuntimeError):
     """調査が成立しなかった。呼び出し元は捏造せず失敗として扱うこと。"""
@@ -318,7 +323,9 @@ Google 検索を必ず使い、エリア「{area}」における「{theme}」の
 4. テーマが「個室」「接待」を含む場合は、個室の有無を検索で確認できた施設を優先すること。
 5. 住所は地図生成に使うため、検索で確認できた施設は必ず正式表記 (東京都…丁目…番…) で
    記載すること。ただし確認できない場合に住所を創作してはならない (空文字のままにする)。
-6. 出力は ```json ... ``` のコードブロック内に、下記スキーマのJSONのみ。前置き・解説は不要。
+6. 出力は ```json ... ``` のコードブロック内に、下記スキーマのJSONのみ。
+   応答の最初の文字から ```json で始めること。調査の経過・前置き・要約文・謝辞を
+   本文に書かないこと (実測: 散文だけを返して解析不能になる回がある)。
 
 【出力JSONスキーマ】
 {{
@@ -786,11 +793,23 @@ def run_autonomous_research(
     print(f"[Research Engine] 調査開始: {area} × {theme} (Top {count})")
 
     reasons: list[str] = []
-    text_resp, sources, queries = "", [], []
+    # 応答は「テキストがある」だけでは使えない。JSON として読めて spots が入っている
+    # ところまでを 1 モデル分の成否とし、駄目なら次のモデルへ落とす。
+    # 修正前はパースをループの外で 1 回だけ行っていたため、散文が返った 1 回で
+    # 候補モデルを 2 つ残したまま 502 になっていた (実測 9/20 18:14 阿佐ヶ谷)。
+    parsed: tuple[dict, list, list] | None = None
     # 検索が走らなかった応答は捨てずに退避し、全モデルが未グラウンディングだった時だけ使う
-    ungrounded: tuple[str, list, list] | None = None
+    ungrounded: tuple[dict, list, list] | None = None
 
-    for model in models:
+    # 不良応答は間欠的 (同じ条件の再実行では正常な JSON が返った) なので、パースに
+    # 失敗したモデルは 1 巡したあとに 1 度だけ再試行する。無料枠を食い潰さないよう
+    # 再試行は全体で PARSE_RETRY_BUDGET 回まで。
+    queue = list(models)
+    retry_budget = PARSE_RETRY_BUDGET
+    retried: set[str] = set()
+
+    while queue:
+        model = queue.pop(0)
         try:
             res_json = call_gemini(model, prompt, key)
         except urllib.error.HTTPError as he:
@@ -807,38 +826,52 @@ def run_autonomous_research(
         if not cand_text:
             reasons.append(f"{model}: 応答テキストが空")
             continue
+
+        try:
+            cand_data = extract_json_from_text(cand_text)
+        except Exception as parse_err:
+            finish = (res_json.get("candidates") or [{}])[0].get("finishReason", "?")
+            reasons.append(f"{model}: JSONパース失敗: {parse_err} (finishReason={finish})")
+            print(
+                f"[Warning] モデル '{model}' の応答を JSON として読めません "
+                f"(finishReason={finish}, {len(cand_text)}文字): {parse_err}"
+            )
+            if retry_budget > 0 and model not in retried:
+                retried.add(model)
+                retry_budget -= 1
+                queue.append(model)
+                print(f"[Research Engine] '{model}' は間欠的な不良応答の可能性があるため後で再試行します")
+            continue
+
+        if not isinstance(cand_data, dict) or not isinstance(cand_data.get("spots"), list):
+            shape = type(cand_data).__name__ if not isinstance(cand_data, dict) else "spots 欠落"
+            reasons.append(f"{model}: 調査結果にスポット一覧が含まれていない ({shape})")
+            print(f"[Warning] モデル '{model}' の応答にスポット一覧がありません ({shape})")
+            continue
+
         if not cand_queries:
             # 実測 (9/20 五反田): 検索クエリ 0件 = Google 検索を使わずに生成した応答。
             # 裏取りが無いので、他のモデルで検索付きの応答が取れないか先に試す。
             reasons.append(f"{model}: 検索が実行されていない (webSearchQueries 0件)")
             print(f"[Warning] モデル '{model}' は検索を使わずに応答しました。次のモデルを試します")
             if ungrounded is None:
-                ungrounded = (cand_text, cand_sources, cand_queries)
+                ungrounded = (cand_data, cand_sources, cand_queries)
             continue
-        text_resp, sources, queries = cand_text, cand_sources, cand_queries
-        print(f"[Research Engine] モデル '{model}' で応答取得 (検索クエリ {len(queries)}件 / 出典 {len(sources)}件)")
+
+        parsed = (cand_data, cand_sources, cand_queries)
+        print(f"[Research Engine] モデル '{model}' で応答取得 (検索クエリ {len(cand_queries)}件 / 出典 {len(cand_sources)}件)")
         break
 
-    grounded = bool(text_resp)
+    grounded = parsed is not None
     if not grounded and ungrounded is not None:
-        text_resp, sources, queries = ungrounded
+        parsed = ungrounded
         print("[Warning] どのモデルも検索を使えませんでした。裏取り無しの応答を使いますが、クチコミは掲載しません")
 
-    if not text_resp:
+    if parsed is None:
         raise ResearchUnavailable("Gemini から調査結果を取得できませんでした", reasons)
 
-    try:
-        data = extract_json_from_text(text_resp)
-    except Exception as parse_err:
-        reasons.append(f"JSONパース失敗: {parse_err}")
-        raise ResearchUnavailable("調査結果の解析に失敗しました", reasons) from parse_err
-
-    if not isinstance(data, dict):
-        raise ResearchUnavailable("調査結果の形式が不正です", reasons + [f"型={type(data).__name__}"])
-
-    spots = data.get("spots")
-    if not isinstance(spots, list):
-        raise ResearchUnavailable("調査結果にスポット一覧が含まれていません", reasons)
+    data, sources, queries = parsed
+    spots = data["spots"]
 
     by_genre = filter_by_genre([s for s in spots if isinstance(s, dict)], theme)
     # エリア判定より前に住所を補完する。住所が無いとエリアの確認も地図掲載もできないため。
