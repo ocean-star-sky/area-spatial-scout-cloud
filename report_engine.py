@@ -15,7 +15,6 @@ import html
 import math
 import sys
 import csv
-import json
 import unicodedata
 import urllib.parse
 import urllib.request
@@ -23,6 +22,8 @@ import concurrent.futures
 from datetime import datetime
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
+
+from geocoding import geocode_address
 
 import docx
 from docx import Document
@@ -222,23 +223,6 @@ def add_callout_box(doc, text: str, title: str = None, border_color_hex=COLOR_PR
     p_after = doc.add_paragraph()
     p_after.paragraph_format.space_before = Pt(1)
     p_after.paragraph_format.space_after = Pt(1)
-
-
-def geocode_address(address: str) -> tuple[float, float] | None:
-    """国土地理院APIを用いて住所から緯度経度を取得 (タイムアウト1秒・非同期/フェイルセーフ)"""
-    if not address:
-        return None
-    url = f"https://msearch.gsi.go.jp/address-search/AddressSearch?q={urllib.parse.quote(address.strip())}"
-    req = urllib.request.Request(url, headers={"User-Agent": "AntigravityMapScout/2.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=1.0) as res:
-            data = json.loads(res.read().decode("utf-8"))
-            if data and len(data) > 0:
-                coords = data[0]["geometry"]["coordinates"]
-                return float(coords[1]), float(coords[0])
-    except Exception:
-        pass
-    return None
 
 
 def deg2num(lat_deg, lon_deg, zoom):
@@ -636,6 +620,15 @@ def create_docx_report(data: dict, output_path: Path, map_image_path: Path = Non
     r_sum = p_sum.add_run(safe_nfc(meta.get("summary_text", "")))
     format_run(r_sum, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MAIN_HEX)
 
+    area_notes = []
+    if meta.get("area_excluded"):
+        names = "、".join(f"{e['name']}({e.get('distance_km')}km)" for e in meta["area_excluded"][:5])
+        area_notes.append(f"指定エリアから離れていたため除外: {names}")
+    if meta.get("area_unverified_count"):
+        area_notes.append(f"住所を確認できずエリア判定ができなかったスポット: {meta['area_unverified_count']}件")
+    if area_notes:
+        add_callout_box(doc, "\n".join(area_notes), title="【エリア一致の検証について】")
+
     findings_list = meta.get("findings", [])
     if findings_list:
         add_callout_box(doc, "\n".join([safe_nfc(f) for f in findings_list]), title="【主要ファインディングス】")
@@ -858,6 +851,15 @@ def create_docx_report_mobile(data: dict, output_path: Path, map_image_path: Pat
     p_sum.paragraph_format.space_after = Pt(3)
     r_sum = p_sum.add_run(safe_nfc(meta.get("summary_text", "")))
     format_run(r_sum, font_name=FONT_JP, size_pt=12.0, color_hex=COLOR_TEXT_MAIN_HEX)
+
+    area_notes = []
+    if meta.get("area_excluded"):
+        names = "、".join(f"{e['name']}({e.get('distance_km')}km)" for e in meta["area_excluded"][:5])
+        area_notes.append(f"指定エリアから離れていたため除外: {names}")
+    if meta.get("area_unverified_count"):
+        area_notes.append(f"住所を確認できずエリア判定ができなかったスポット: {meta['area_unverified_count']}件")
+    if area_notes:
+        add_callout_box(doc, "\n".join(area_notes), title="【エリア一致の検証について】")
 
     findings_list = meta.get("findings", [])
     if findings_list:

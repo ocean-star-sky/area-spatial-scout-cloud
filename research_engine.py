@@ -23,6 +23,8 @@ from pathlib import Path
 
 from PIL import Image
 
+from geocoding import geocode_address, haversine_km
+
 # Gemini の無料枠は「モデル単位の 1 日あたりリクエスト数」で切られる
 # (実測: 429 GenerateRequestsPerDayPerProjectPerModel-FreeTier)。
 # そのため候補は必ず別モデルを並べ、1 モデルが枯渇しても次へ落ちるようにする。
@@ -31,6 +33,11 @@ API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
 REQUEST_TIMEOUT = 30.0
 MAX_OUTPUT_TOKENS = 8192
 PHOTOS_PER_SPOT = 2
+
+# 指定エリアからこの距離を超えるスポットは「別エリア」として除外する。
+# 実測 (新橋を基準): 銀座 0.5km / 虎ノ門 0.7km / 六本木 2.3km / 渋谷 5.2km /
+# 新宿 5.6km / 池袋 8.0km / 横浜 26km。同一・隣接と別エリアはこの値で分離できる。
+AREA_MATCH_RADIUS_KM = float(os.environ.get("AREA_MATCH_RADIUS_KM", "3.0"))
 
 
 class ResearchUnavailable(RuntimeError):
@@ -280,6 +287,87 @@ def _extract_text_and_sources(res_json: dict) -> tuple[str, list[dict], list[str
     return text, sources, queries
 
 
+def _area_tokens(area: str) -> list[str]:
+    """エリア指定から住所照合に使う語を作る (「新橋駅」「新橋エリア」→「新橋」)"""
+    base = (area or "").strip()
+    tokens = {base}
+    for suffix in ("駅周辺", "駅前", "駅", "エリア", "周辺", "近辺"):
+        if base.endswith(suffix) and len(base) > len(suffix):
+            tokens.add(base[: -len(suffix)])
+    return [t for t in tokens if t]
+
+
+def verify_area_match(
+    spots: list[dict],
+    area: str,
+    radius_km: float = AREA_MATCH_RADIUS_KM,
+) -> tuple[list[dict], list[dict]]:
+    """指定エリアに実際に所在するスポットだけを残す。
+
+    基準座標の求め方に注意: 「新橋」のような地名だけを国土地理院へ渡すと、全国の
+    同名地点の先頭 (実測では宮城県) が返るため基準に使えない。そこで
+    「住所にエリア名を含むスポット」を先に確定させ、その重心を基準座標とする。
+
+    判定は 3 通り:
+      - address にエリア名を含む            -> 一致 (method="address")
+      - 基準から radius_km 以内             -> 一致 (method="proximity")
+      - 基準から radius_km より遠い          -> 除外 (別エリアと確認できた)
+    住所が無い / 解決できない場合は「確認できない」として残し、フラグで示す。
+    基準座標を 1 件も確定できない場合は、除外の根拠が無いため誰も落とさない。
+    """
+    tokens = _area_tokens(area)
+    anchors: list[tuple[float, float]] = []
+
+    # 第1段: 住所にエリア名を含むものを基準として確定する
+    for s in spots:
+        addr = (s.get("address") or "").strip()
+        if addr and any(t in addr for t in tokens):
+            s["area_match"] = "address"
+            coord = geocode_address(addr)
+            if coord:
+                s["lat"], s["lon"] = coord
+                anchors.append(coord)
+
+    if not anchors:
+        # 基準が作れない = 遠い近いを判断する根拠が無い。憶測で落とさない。
+        for s in spots:
+            s.setdefault("area_match", "unverified")
+        print(f"[Area Filter] 「{area}」の基準座標を確定できないため、エリア判定は行いません")
+        return spots, []
+
+    ref = (
+        sum(c[0] for c in anchors) / len(anchors),
+        sum(c[1] for c in anchors) / len(anchors),
+    )
+
+    kept: list[dict] = []
+    dropped: list[dict] = []
+    for s in spots:
+        if s.get("area_match") == "address":
+            kept.append(s)
+            continue
+
+        addr = (s.get("address") or "").strip()
+        coord = geocode_address(addr) if addr else None
+        if not coord:
+            s["area_match"] = "unverified"
+            kept.append(s)
+            continue
+
+        distance = haversine_km(ref, coord)
+        s["distance_km"] = round(distance, 2)
+        if distance <= radius_km:
+            s["lat"], s["lon"] = coord
+            s["area_match"] = "proximity"
+            kept.append(s)
+        else:
+            s["area_match"] = "outside"
+            dropped.append(s)
+            print(f"[Area Filter] 別エリアのため除外: {s.get('name', '?')} ({distance:.1f}km, {addr[:24]})")
+
+    return kept, dropped
+
+
 def filter_by_genre(spots: list[dict], theme: str) -> list[dict]:
     """要求ジャンルと明確に矛盾するスポットを除外する"""
     user_genre = classify_genre(theme)
@@ -391,11 +479,17 @@ def run_autonomous_research(
     if not isinstance(spots, list):
         raise ResearchUnavailable("調査結果にスポット一覧が含まれていません", reasons)
 
-    data["spots"] = filter_by_genre([s for s in spots if isinstance(s, dict)], theme)[:count]
+    by_genre = filter_by_genre([s for s in spots if isinstance(s, dict)], theme)
+    in_area, out_of_area = verify_area_match(by_genre, area)
+    data["spots"] = in_area[:count]
     if not data["spots"]:
         raise ResearchUnavailable(
             f"「{area} × {theme}」に該当するスポットを確認できませんでした",
-            reasons + [f"ジャンル絞り込み前 {len(spots)}件 → 0件"],
+            reasons
+            + [
+                f"取得 {len(spots)}件 → ジャンル一致 {len(by_genre)}件 → エリア一致 0件",
+                *[f"別エリア: {s.get('name', '?')} ({s.get('distance_km')}km)" for s in out_of_area[:3]],
+            ],
         )
 
     meta = data.setdefault("meta", {})
@@ -406,10 +500,20 @@ def run_autonomous_research(
     meta["search_queries"] = queries
     meta["requested_count"] = count
     meta["returned_count"] = len(data["spots"])
+    meta["area_match_radius_km"] = AREA_MATCH_RADIUS_KM
+    meta["area_verified_count"] = sum(1 for s in data["spots"] if s.get("area_match") in ("address", "proximity"))
+    meta["area_unverified_count"] = sum(1 for s in data["spots"] if s.get("area_match") == "unverified")
+    meta["area_excluded"] = [
+        {"name": s.get("name", ""), "address": s.get("address", ""), "distance_km": s.get("distance_km")}
+        for s in out_of_area
+    ]
 
     if output_dir:
         attached = attach_photos(data, Path(output_dir))
         print(f"[Research Engine] 実在画像の取得: {attached}枚")
 
-    print(f"[Research Engine] 調査完了: {len(data['spots'])} 件 (要求 {count} 件)")
+    print(
+        f"[Research Engine] 調査完了: {len(data['spots'])} 件 (要求 {count} 件 / "
+        f"エリア確認済 {meta['area_verified_count']} 件 / 別エリア除外 {len(out_of_area)} 件)"
+    )
     return data
