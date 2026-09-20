@@ -83,18 +83,35 @@ GEMINI_API_KEY=xxxx SCOUT_PASSWORD=yyyy ./deploy.sh
 
 ### ステップ 3: Google ドライブ納品を使う場合（任意）
 
-**納品先フォルダは必ず「共有ドライブ」に作ってください。**
-サービスアカウントはマイドライブに保存容量を持たないため、マイドライブ配下のフォルダを
-共有しても `storageQuotaExceeded` で失敗します。
+**サービスアカウントは個人のマイドライブに保存容量を持ちません。**
+やっかいなのは「フォルダ作成だけは成功する」ことで、フォルダは容量を消費しないため
+`files.create` が通り、中へのファイル投入だけが `storageQuotaExceeded` で落ちます。
+結果として**空フォルダだけが延々と作られます**（実測: 納品先に 0 ファイルのフォルダが 11 個）。
+
+納品先に応じて方式が変わります。
+
+#### A. マイドライブへ納品する（共有ドライブを作れない場合）
+
+OAuth ユーザー資格情報を使います。ファイルはあなたの所有になり、あなたの容量を消費します。
+
+```bash
+GDRIVE_OAUTH_JSON='{"client_id":"...","client_secret":"...","refresh_token":"..."}' \
+DRIVE_PARENT_FOLDER_ID=<フォルダID> ./deploy.sh
+```
+
+リフレッシュトークンは Desktop OAuth クライアントで一度だけ同意を取って取得します。
+`rclone` で Drive リモートを設定済みなら、その設定から取り出せます
+（`rclone config show <リモート名>` の `client_id` / `client_secret` / `token` 内の `refresh_token`）。
+
+> この資格情報は Drive 全体への長期アクセス権です。Secret Manager に格納され、
+> Cloud Run へは参照として渡されます。
+
+#### B. 共有ドライブへ納品する
 
 1. 共有ドライブ内に納品先フォルダを作成する
 2. そのフォルダに `area-spatial-scout@<プロジェクトID>.iam.gserviceaccount.com` を
    **「コンテンツ管理者」** として追加する
-3. フォルダ ID を指定して再デプロイする
-
-```bash
-DRIVE_PARENT_FOLDER_ID=<フォルダID> ./deploy.sh
-```
+3. `DRIVE_PARENT_FOLDER_ID=<フォルダID> ./deploy.sh`
 
 書き込めるかを事前に確認するには（ローカル、要認証情報）:
 
@@ -102,8 +119,11 @@ DRIVE_PARENT_FOLDER_ID=<フォルダID> ./deploy.sh
 DRIVE_PARENT_FOLDER_ID=<フォルダID> python3 drive_uploader.py
 ```
 
-この確認は**実際にテストフォルダを作成して削除**します。「親フォルダが読める」だけでは
-サービスアカウントの容量制限を検知できないためです。
+この確認は**実際にテストフォルダを作り、その中へ 1 ファイル投入してから削除**します。
+フォルダ作成までしか試さないと、サービスアカウントの容量制限を検知できないためです。
+
+アップロードが 1 件も成立しなかった場合は、作成したフォルダを削除したうえで失敗を返します
+（納品先に空フォルダを残しません）。
 
 `DRIVE_PARENT_FOLDER_ID` を設定しない場合、ドライブ納品は無効のまま起動し、
 成果物は ZIP / Word の直接ダウンロードで取得できます。
@@ -129,7 +149,8 @@ DRIVE_PARENT_FOLDER_ID=<フォルダID> python3 drive_uploader.py
 | `GEMINI_API_KEY` | ✅ | Gemini API キー（Secret Manager 経由で注入） |
 | `SCOUT_PASSWORD` | ✅ | アクセスキー。未設定時は全 API を 503 で拒否 |
 | `SCOUT_TOKEN_SECRET` | 推奨 | ダウンロードURLの署名鍵。アクセスキーとは別の秘密にする（`deploy.sh` が自動生成）。未設定時はアクセスキーから派生するが、URL が漏れた際にアクセスキー推測の手掛かりになる |
-| `DRIVE_PARENT_FOLDER_ID` | － | 共有ドライブ内の納品先フォルダ ID。未設定ならドライブ納品を行わない |
+| `DRIVE_PARENT_FOLDER_ID` | － | 納品先フォルダ ID。未設定ならドライブ納品を行わない |
+| `GDRIVE_OAUTH_JSON` | － | OAuth ユーザー資格情報 (`client_id` / `client_secret` / `refresh_token`)。設定するとサービスアカウントより優先され、マイドライブへ納品できる |
 | `AREA_MATCH_RADIUS_KM` | － | エリア一致とみなす半径 (km)。既定 `3.0`。狭めると隣接エリアも除外される |
 | `ADDRESS_BACKFILL` | － | `0` で住所の追加取得を無効化。1 回あたり Gemini リクエストが 1 増えるため、モデル別の日次上限を使い切る環境では止められる |
 | `ADDRESS_BACKFILL_MAX` | － | 追加取得で問い合わせる施設数の上限。既定 `20` |
